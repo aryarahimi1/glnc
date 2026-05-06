@@ -56,11 +56,10 @@ jobs:
             asset_name: glnc-darwin-arm64
             os_family: darwin
             native: true
-          - target: bun-darwin-x64
-            runner: macos-13
-            asset_name: glnc-darwin-x64
-            os_family: darwin
-            native: true
+          # darwin-x64 (Intel mac) is dropped from v1.0.x. The free-tier
+          # macos-13 runner pool routinely sits queued for 30+ min, blocking
+          # the entire release. Re-add for v1.1 once the runner situation
+          # improves, or once we have a paid plan with priority access.
           # NOTE on linux/arm64: GitHub-hosted `ubuntu-24.04-arm` runners are
           # generally available for public repos as of 2025 (free tier). We use
           # them so the binary is built natively — `bun build --compile`

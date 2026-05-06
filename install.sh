@@ -139,6 +139,13 @@ esac
 
 info "platform: ${OS}-${ARCH}"
 
+# Intel macOS support is planned for v1.1; v1.0.x ships only darwin-arm64.
+if [ "$OS" = "darwin" ] && [ "$ARCH" = "x64" ]; then
+    error "Intel macOS isn't supported in v1.0.x. Apple Silicon (M1+) only."
+    error "Track v1.1 progress: https://github.com/aryarahimi1/glnc/issues"
+    exit 2
+fi
+
 # ---- curl wrapper ------------------------------------------------------------
 CURL_OPTS=(--fail --location --proto =https --tlsv1.2 --silent --show-error)
 fetch() {
