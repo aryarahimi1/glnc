@@ -4,7 +4,7 @@ A no-bullshit CLI for inspecting on-chain activity. Paste any address or
 transaction hash and get a clean, fast answer — no browser, no account, no API
 key required.
 
-![glnc demo](demo/demo.gif)
+![glnc demo](demo/glnc-demo.gif)
 
 ```
 glnc balance vitalik.eth
