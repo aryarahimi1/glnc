@@ -298,13 +298,13 @@ export const __ssrf = {
  * @returns {Promise<WebhookResult>}
  */
 export async function postWebhook(url, payload, { dryRun = false } = {}) {
-  if (dryRun) {
-    return { ok: true, attempts: 0, dryRun: true };
-  }
-
   const validation = await validateWebhookUrl(url);
   if (!validation.ok) {
     return { ok: false, error: validation.error, attempts: 0 };
+  }
+
+  if (dryRun) {
+    return { ok: true, attempts: 0, dryRun: true };
   }
 
   const body = JSON.stringify(payload);

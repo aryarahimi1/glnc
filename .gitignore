@@ -10,3 +10,6 @@ dist/
 # Homebrew tap lives in its own repo (glnc-cli/homebrew-glnc).
 # Kept locally as a working directory but excluded from the main repo.
 homebrew-glnc/
+
+# Private launch strategy — do not publish.
+LAUNCH*.md

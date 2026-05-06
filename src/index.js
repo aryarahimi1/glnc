@@ -30,7 +30,6 @@ import { SCHEMA } from './output/schemas.js';
 export { runAlert } from './alert/index.js';
 export { runHistory } from './history/run.js';
 
-// Lazily loaded — written by concurrent agent; gracefully absent if not ready yet.
 let _filterDust = null;
 async function loadFilterDust() {
   if (_filterDust) return _filterDust;

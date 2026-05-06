@@ -1,8 +1,9 @@
 # glnc
 
-A no-bullshit CLI for inspecting on-chain activity. Paste any address or
-transaction hash and get a clean, fast answer — no browser, no account, no API
-key required.
+Etherscan in your terminal — no login, no API key, no tracking.
+
+Paste any address or transaction hash and get a clean, fast answer — no
+browser, no account, no API key required.
 
 ![glnc demo](demo/glnc-demo.gif)
 
@@ -20,6 +21,7 @@ glnc gas                                  ← live gas across 9 chains
 
 | | |
 |---|---|
+| **Zero tracking** | All RPCs are free public endpoints. No account, no API key, nothing phoned home |
 | **Token auto-discovery** | Scans ~1,400 tokens per chain via the Uniswap token list — not just USDC/USDT |
 | **ENS resolution** | `vitalik.eth` just works. Reverse lookup annotates addresses too |
 | **Multi-wallet** | Pass multiple addresses; get per-wallet tables + portfolio grand total |
@@ -34,7 +36,6 @@ glnc gas                                  ← live gas across 9 chains
 | **Hardened webhook** | SSRF-validated URLs, scheme allowlist, RFC1918/IMDS/loopback blocked |
 | **JSON + NDJSON** | Stable, versioned envelopes on stdout — `--json` for one-shot, NDJSON for `--watch` |
 | **6 chains for balance/tx · 9 for gas** | See the [Chain support matrix](#chain-support-matrix) |
-| **Zero tracking** | All RPCs are free public endpoints. Nothing phoned home |
 
 ---
 

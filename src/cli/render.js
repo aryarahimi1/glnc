@@ -1546,6 +1546,9 @@ ${c.bold('USAGE')}  glnc <command> [args] [flags]
   tx <hash>                decode a transaction
   gas                      current gas across EVM + BTC + SOL
   history <address>        export transaction history (CSV / JSON)
+  alert <address>          watch a condition; POST to webhook on trigger
+  interactive              guided TUI for building a command
+  schema                   print JSON output schemas
 
 ${c.bold('COMMON FLAGS')}
   --chain <name>  --watch  --json  --verbose  --no-color

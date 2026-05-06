@@ -6,6 +6,7 @@
     "glnc": "./bin/glnc.js"
   },
   "scripts": {
+    "test": "node --test 'test/**/*.test.js'",
     "start": "node bin/glnc.js",
     "start:bun": "bun bin/glnc.js",
     "interactive": "node bin/glnc.js interactive",
