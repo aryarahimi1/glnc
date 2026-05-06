@@ -56,11 +56,15 @@ jobs:
             asset_name: glnc-darwin-arm64
             os_family: darwin
             native: true
+          # darwin-x64 is CROSS-COMPILED on a Linux runner. Bun supports
+          # cross-compiling --target=bun-darwin-x64 from any host. We avoid
+          # the macos-13 free-tier runner pool (frequently 30+ min queued).
+          # Smoke test is gated on `native: true` so it skips on this entry.
           - target: bun-darwin-x64
-            runner: macos-13
+            runner: ubuntu-latest
             asset_name: glnc-darwin-x64
-            os_family: darwin
-            native: true
+            os_family: linux
+            native: false
           # NOTE on linux/arm64: GitHub-hosted `ubuntu-24.04-arm` runners are
           # generally available for public repos as of 2025 (free tier). We use
           # them so the binary is built natively — `bun build --compile`
