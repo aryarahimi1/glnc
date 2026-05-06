@@ -1,11 +1,12 @@
 # glnc
 
-Etherscan in your terminal — no login, no API key, no tracking.
-
-Paste any address or transaction hash and get a clean, fast answer — no
-browser, no account, no API key required.
-
 ![glnc demo](demo/glnc-demo.gif)
+
+```sh
+brew install aryarahimi1/glnc/glnc
+```
+
+Etherscan in your terminal — no browser, no account, no API key.
 
 ```
 glnc balance vitalik.eth
