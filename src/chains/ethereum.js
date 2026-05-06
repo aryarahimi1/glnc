@@ -1,0 +1,96 @@
+/**
+ * src/chains/ethereum.js
+ *
+ * Ethereum Mainnet chain adapter.
+ *
+ * deps (add to package.json):
+ *   "viem": "^2.0.0"
+ *
+ * Exports:
+ *   name          — 'ethereum'
+ *   getBalances(address)       — returns standard balance shape
+ *   getTransaction(txHash)     — returns raw tx + receipt fields
+ */
+
+import { mainnet } from 'viem/chains';
+import {
+  makeClient,
+  fetchERC20Balances,
+  buildBalanceResponse,
+  buildErrorResponse,
+  formatUnits,
+  getAddress,
+} from './_evm.js';
+
+export const name = 'ethereum';
+
+export const RPC_URL = 'https://ethereum-rpc.publicnode.com';
+export const viemChain = mainnet;
+export const nativeSymbol = 'ETH';
+
+function getClient() {
+  return makeClient(RPC_URL, mainnet);
+}
+
+// Lazy singleton — resolved once per process, reused on every subsequent call.
+let _tokenList = null;
+async function resolveTokenList() {
+  if (_tokenList) return _tokenList;
+  const { getTokenList } = await import('../tokens/index.js');
+  _tokenList = await getTokenList('ethereum');
+  return _tokenList;
+}
+
+/**
+ * Fetch native ETH balance + top ERC-20 balances for an address.
+ *
+ * @param {string} address  - 0x-prefixed EVM address
+ * @returns {Promise<{
+ *   chain: string,
+ *   native: { symbol: string, amount: string, decimals: number },
+ *   tokens: { symbol: string, amount: string, decimals: number, contract: string }[],
+ *   error: string | null
+ * }>}
+ */
+export async function getBalances(address) {
+  try {
+    const checksummed = getAddress(address);
+    const client = getClient();
+
+    const tokenList = await resolveTokenList();
+    const [nativeWei, tokens] = await Promise.all([
+      client.getBalance({ address: checksummed }),
+      fetchERC20Balances(client, checksummed, tokenList),
+    ]);
+
+    return buildBalanceResponse(
+      name,
+      'ETH',
+      formatUnits(nativeWei, 18),
+      18,
+      tokens,
+    );
+  } catch (err) {
+    return buildErrorResponse(name, err?.message ?? String(err));
+  }
+}
+
+/**
+ * Fetch a transaction by hash — returns raw viem transaction + receipt.
+ * The decoder layer (src/decoders/index.js) calls this to get raw data.
+ *
+ * @param {string} txHash
+ * @returns {Promise<{ tx: object, receipt: object } | null>}
+ */
+export async function getTransaction(txHash) {
+  try {
+    const client = getClient();
+    const [tx, receipt] = await Promise.all([
+      client.getTransaction({ hash: txHash }),
+      client.getTransactionReceipt({ hash: txHash }),
+    ]);
+    return { tx, receipt };
+  } catch (err) {
+    return { tx: null, receipt: null, error: err?.message ?? String(err) };
+  }
+}

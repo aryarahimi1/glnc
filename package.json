@@ -1,0 +1,23 @@
+{
+  "name": "glnc",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": {
+    "glnc": "./bin/glnc.js"
+  },
+  "scripts": {
+    "start": "node bin/glnc.js",
+    "start:bun": "bun bin/glnc.js",
+    "interactive": "node bin/glnc.js interactive",
+    "balance": "node bin/glnc.js balance",
+    "tx": "node bin/glnc.js tx",
+    "gas": "node bin/glnc.js gas"
+  },
+  "dependencies": {
+    "viem": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
