@@ -11,26 +11,17 @@
  *   2 — network/upstream error
  */
 
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-
 import { parseArgs, ParseError } from '../src/cli/args.js';
 import { renderHelp, renderCommandHelp, renderVersion, renderError } from '../src/cli/render.js';
 import { runBalance, runTx, runWatch, runGas, runGasWatch, runAlert, runHistory } from '../src/index.js';
 import { runInteractive } from '../src/cli/interactive.js';
 import { ALL_SCHEMAS } from '../src/output/schemas.js';
+// Static JSON import so the version is embedded into both the Bun-compiled
+// single-file binary and the Node ESM runtime. Requires Node >=20.10 (see
+// "engines" in package.json) and is natively supported by `bun --compile`.
+import pkg from '../package.json' with { type: 'json' };
 
-// Read version from package.json. Using fs (instead of JSON import attributes)
-// so this works under Node 18+ without requiring the --experimental-* flag.
-let version = '1.0.0';
-try {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'));
-  version = pkg.version ?? version;
-} catch {
-  // Fall back to hard-coded version if package.json can't be read.
-}
+const version = pkg.version;
 
 let args;
 try {
