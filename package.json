@@ -1,7 +1,13 @@
 {
   "name": "glnc",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
+  "files": [
+    "bin",
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
   "bin": {
     "glnc": "./bin/glnc.js"
   },

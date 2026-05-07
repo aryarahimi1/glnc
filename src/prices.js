@@ -51,6 +51,29 @@ const CHAIN_TO_PLATFORM = {
 const BATCH_SIZE = 100; // CoinGecko URL length safety limit
 
 /**
+ * Fetch with exponential backoff on HTTP 429 (rate-limit).
+ * Creates a fresh AbortSignal per attempt so timeout is not consumed by wait.
+ *
+ * @param {string} url
+ * @param {number} timeoutMs  - per-attempt timeout
+ * @param {number} [maxRetries=3]
+ * @returns {Promise<Response>}
+ */
+async function fetchWithRetry(url, timeoutMs, maxRetries = 3) {
+  const headers = { Accept: 'application/json' };
+  let delay = 1_000;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    if (res.status !== 429) return res;
+    if (attempt === maxRetries) return res;
+    const ra = res.headers.get('Retry-After');
+    const wait = ra ? Math.min(Number(ra) * 1_000, 30_000) : delay;
+    await new Promise(r => setTimeout(r, wait));
+    delay *= 2;
+  }
+}
+
+/**
  * Return true if a cached entry is still within the TTL.
  *
  * @param {{ cachedAt: number }} entry
@@ -86,10 +109,7 @@ export async function getPrices(symbols) {
       try {
         const url =
           `${COINGECKO_BASE}/simple/price?ids=${ids.join(',')}&vs_currencies=usd`;
-        const res = await fetch(url, {
-          headers: { Accept: 'application/json' },
-          signal: AbortSignal.timeout(8000),
-        });
+        const res = await fetchWithRetry(url, 8_000);
         if (res.ok) {
           const data = await res.json();
           for (const [id, val] of Object.entries(data)) {
@@ -165,10 +185,7 @@ export async function getTokenPrices(chainName, contractAddresses) {
       `?contract_addresses=${csv}&vs_currencies=usd`;
 
     try {
-      const res = await fetch(url, {
-        headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(10_000),
-      });
+      const res = await fetchWithRetry(url, 10_000);
       if (res.ok) {
         const data = await res.json();
         for (const [addr, val] of Object.entries(data)) {

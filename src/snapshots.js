@@ -15,6 +15,8 @@ import { dirname } from 'node:path';
 
 const SNAPSHOT_PATH = `${process.env.HOME}/.glnc/snapshots.json`;
 
+const SNAPSHOT_TTL_MS = 7 * 24 * 60 * 60 * 1_000; // 7 days
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -34,6 +36,33 @@ async function readRaw() {
 }
 
 /**
+ * Drop entries older than SNAPSHOT_TTL_MS. Mutates data in-place and returns it.
+ *
+ * @param {Record<string, any>} data
+ * @returns {Record<string, any>}
+ */
+function pruneStale(data) {
+  const cutoff = Date.now() - SNAPSHOT_TTL_MS;
+  for (const addrKey of Object.keys(data)) {
+    const addrData = data[addrKey];
+    if (!addrData || typeof addrData !== 'object') { delete data[addrKey]; continue; }
+    for (const chain of Object.keys(addrData)) {
+      const tokens = addrData[chain];
+      if (!tokens || typeof tokens !== 'object') { delete addrData[chain]; continue; }
+      for (const sym of Object.keys(tokens)) {
+        const entry = tokens[sym];
+        if (!entry || !entry.timestamp || entry.timestamp < cutoff) {
+          delete tokens[sym];
+        }
+      }
+      if (Object.keys(tokens).length === 0) delete addrData[chain];
+    }
+    if (Object.keys(addrData).length === 0) delete data[addrKey];
+  }
+  return data;
+}
+
+/**
  * Write the given object to the snapshot file. Creates the directory if
  * needed. Never throws.
  *
@@ -43,7 +72,7 @@ async function readRaw() {
 async function writeRaw(data) {
   try {
     await mkdir(dirname(SNAPSHOT_PATH), { recursive: true });
-    await writeFile(SNAPSHOT_PATH, JSON.stringify(data, null, 2));
+    await writeFile(SNAPSHOT_PATH, JSON.stringify(pruneStale(data), null, 2));
   } catch {
     // Non-fatal — silently ignore write failures
   }

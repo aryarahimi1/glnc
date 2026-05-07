@@ -21,7 +21,7 @@
  *   2 — all network requests failed
  */
 
-import { getPrices } from './prices.js';
+import { getPrices, getTokenPrices } from './prices.js';
 import { readSnapshot, writeSnapshot } from './snapshots.js';
 import { wrap, wrapError, wrapEvent } from './output/envelope.js';
 import { emitJSON, emitNDJSON } from './output/emit.js';
@@ -452,6 +452,35 @@ async function fetchBalances(addressInput, chainFilter, opts) {
       prices = await getPrices([...symbols]);
     } catch {
       // Non-fatal — render without USD values
+    }
+  }
+
+  // Fill in prices for EVM tokens that have a contract address but no symbol-
+  // based price (e.g. long-tail tokens absent from SYMBOL_TO_ID).
+  const contractsByChain = new Map();
+  for (const wallet of wallets) {
+    for (const { chain, result } of wallet.results) {
+      if (!result || result.error) continue;
+      if (!['ethereum', 'polygon', 'arbitrum', 'base'].includes(chain)) continue;
+      for (const token of result.tokens ?? []) {
+        if (!token.contract || !token.symbol) continue;
+        if (prices[token.symbol.toUpperCase()] !== undefined) continue;
+        if (!contractsByChain.has(chain)) contractsByChain.set(chain, []);
+        contractsByChain.get(chain).push({ addr: token.contract.toLowerCase(), sym: token.symbol.toUpperCase() });
+      }
+    }
+  }
+  for (const [chain, entries] of contractsByChain) {
+    try {
+      const addrs = [...new Set(entries.map(e => e.addr))];
+      const contractPrices = await getTokenPrices(chain, addrs);
+      for (const { addr, sym } of entries) {
+        if (contractPrices[addr] !== undefined && prices[sym] === undefined) {
+          prices[sym] = contractPrices[addr];
+        }
+      }
+    } catch {
+      // Non-fatal
     }
   }
 
