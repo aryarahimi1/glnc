@@ -173,10 +173,14 @@ export async function select({ message, hint, choices, initial = 0 }) {
 
   let index = Math.max(0, Math.min(initial, choices.length - 1));
   const labelWidth = Math.max(...choices.map(ch => visibleLen(ch.label)));
+  const quitChoiceIdx = choices.findIndex(ch => ch.value === 'quit');
+
+  const defaultHint = '↑/↓ move · Enter select · Esc cancel · Ctrl+C quit';
+  const hintText = hint ?? defaultHint;
 
   const renderHeader = () => {
     const tag = theme.brand('›');
-    const hintStr = hint ? ' ' + theme.brandDim('(' + hint + ')') : '';
+    const hintStr = ' ' + theme.brandDim('(' + hintText + ')');
     write(tag + ' ' + c.bold(message) + hintStr + '\n');
   };
 
@@ -220,7 +224,7 @@ export async function select({ message, hint, choices, initial = 0 }) {
     const onData = (buf) => {
       const keys = parseKeys(buf.toString());
       for (const key of keys) {
-        if (key.type === 'ctrl-c' || key.type === 'ctrl-d') {
+        if (key.type === 'ctrl-c' || key.type === 'ctrl-d' || key.type === 'esc') {
           return finish(reject, new CancelledError());
         }
         if (key.type === 'up' || (key.type === 'char' && key.value === 'k')) {
@@ -237,6 +241,11 @@ export async function select({ message, hint, choices, initial = 0 }) {
           return finish(resolve, choices[index].value);
         }
         if (key.type === 'char') {
+          // 'q' jumps to a Quit choice if one exists
+          if ((key.value === 'q' || key.value === 'Q') && quitChoiceIdx >= 0) {
+            index = quitChoiceIdx;
+            return finish(resolve, choices[quitChoiceIdx].value);
+          }
           const n = parseInt(key.value, 10);
           if (!isNaN(n) && n >= 1 && n <= choices.length) {
             index = n - 1;
@@ -266,21 +275,52 @@ export async function select({ message, hint, choices, initial = 0 }) {
  * @param {string} [args.hint]
  * @param {string} [args.placeholder]
  * @param {string} [args.initial]
+ * @param {boolean} [args.required]   if true, empty Enter is rejected with an inline notice
+ * @param {boolean} [args.acceptPlaceholder]  if true, empty Enter resolves to the placeholder value
  * @returns {Promise<string>}
  */
-export async function input({ message, hint, placeholder = '', initial = '' }) {
+export async function input({
+  message,
+  hint,
+  placeholder = '',
+  initial = '',
+  required = false,
+  acceptPlaceholder = false,
+}) {
   ensureTTY();
   installGlobalCleanup();
 
   let buffer = initial;
+  let errorMsg = '';
+
+  const defaultHint = required
+    ? (acceptPlaceholder && placeholder
+        ? 'Enter for placeholder · Esc cancel'
+        : 'Enter to submit · Esc cancel')
+    : 'Enter to submit · Esc cancel';
+  const hintText = hint ?? defaultHint;
+
   const prefix =
     theme.brand('›') + ' ' + c.bold(message) +
-    (hint ? ' ' + theme.brandDim('(' + hint + ')') : '') + ' ';
+    ' ' + theme.brandDim('(' + hintText + ')') + ' ';
+
+  // We may render an extra error line under the prompt; track whether it's there
+  // so we can clean it up before re-rendering or finishing.
+  let errorLineShown = false;
+
+  const clearErrorLine = () => {
+    if (!errorLineShown) return;
+    write('\n');             // step onto the error line
+    clearLine();             // wipe it
+    write('\x1b[1A');        // move back up
+    errorLineShown = false;
+  };
 
   const render = () => {
+    clearErrorLine();
     clearLine();
     if (buffer.length === 0 && placeholder) {
-      // Dim italic placeholder: \x1b[2m (dim) + \x1b[3m (italic)
+      // Dim italic placeholder
       const styledPlaceholder = '\x1b[2m\x1b[3m' + placeholder + '\x1b[23m\x1b[0m';
       write(prefix + styledPlaceholder);
       const back = placeholder.length;
@@ -288,10 +328,21 @@ export async function input({ message, hint, placeholder = '', initial = '' }) {
     } else {
       write(prefix + buffer);
     }
+    if (errorMsg) {
+      // Save column, drop a line for the error, then come back
+      write('\n  ' + c.dim('⚠ ') + c.dim(errorMsg));
+      write('\x1b[1A');                    // move cursor back up to input line
+      // restore horizontal position to end of buffer (or placeholder start)
+      write('\r');
+      const visible = buffer.length === 0 && placeholder ? 0 : buffer.length;
+      write(`\x1b[${visibleLen(prefix) + visible}C`);
+      errorLineShown = true;
+    }
   };
 
   return new Promise((resolve, reject) => {
     const finish = (fn, value) => {
+      clearErrorLine();
       stdin.setRawMode(false);
       stdin.removeListener('data', onData);
       stdin.pause();
@@ -304,15 +355,28 @@ export async function input({ message, hint, placeholder = '', initial = '' }) {
       let dirty = false;
 
       for (const key of keys) {
-        if (key.type === 'ctrl-c') return finish(reject, new CancelledError());
+        if (key.type === 'ctrl-c' || key.type === 'esc') {
+          return finish(reject, new CancelledError());
+        }
         if (key.type === 'ctrl-d' && buffer.length === 0) {
           return finish(reject, new CancelledError());
         }
-        if (key.type === 'enter') return finish(resolve, buffer);
+        if (key.type === 'enter') {
+          if (buffer.length === 0 && acceptPlaceholder && placeholder) {
+            return finish(resolve, placeholder);
+          }
+          if (required && buffer.trim().length === 0) {
+            errorMsg = 'value required — type something or press Esc to cancel';
+            dirty = true;
+            continue;
+          }
+          return finish(resolve, buffer);
+        }
 
         if (key.type === 'backspace') {
           if (buffer.length > 0) {
             buffer = buffer.slice(0, -1);
+            errorMsg = '';
             dirty = true;
           }
           continue;
@@ -320,9 +384,10 @@ export async function input({ message, hint, placeholder = '', initial = '' }) {
 
         if (key.type === 'char') {
           buffer += key.value;
+          errorMsg = '';
           dirty = true;
         }
-        // ignore arrow keys, esc, etc.
+        // ignore arrow keys, etc.
       }
 
       if (dirty) render();

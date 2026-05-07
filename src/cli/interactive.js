@@ -123,7 +123,7 @@ function printBanner(version) {
      pr(c.bold('Chains'))],
     [ctr(''),
      pr(chRow('⬢', 'Ethereum', '◆', 'Arbitrum'))],
-    [ctr(theme.gold('Ctrl+C') + c.dim('  to exit')),
+    [ctr(theme.gold('Esc') + c.dim(' back · ') + theme.gold('Ctrl+C') + c.dim(' quit')),
      pr(chRow('⬡', 'Polygon', '▲', 'Base'))],
     [ctr(''),
      pr(chRow('◎', 'Solana', '₿', 'Bitcoin'))],
@@ -154,16 +154,14 @@ function outputOpts(mode) {
 async function balanceFlow(session) {
   const address = await input({
     message: 'Address',
-    placeholder: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
+    placeholder: session.lastAddress || '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
+    acceptPlaceholder: true,
+    required: true,
   });
-  if (!address.trim()) {
-    console.log(c.dim('  no address provided — back to menu'));
-    return;
-  }
+  session.lastAddress = address.trim();
 
   const chain = await select({
     message: 'Which chain?',
-    hint: '↑/↓ to move, Enter to select',
     choices: BALANCE_CHAINS,
   });
 
@@ -206,7 +204,6 @@ async function balanceFlow(session) {
 async function gasFlow(session) {
   const chain = await select({
     message: 'Which chain?',
-    hint: '↑/↓ to move, Enter to select',
     choices: GAS_CHAIN_CHOICES,
   });
 
@@ -239,15 +236,11 @@ async function txFlow(session) {
   const hash = await input({
     message: 'Transaction hash',
     placeholder: '0x… (64 hex) or base58 (Solana)',
+    required: true,
   });
-  if (!hash.trim()) {
-    console.log(c.dim('  no hash provided — back to menu'));
-    return;
-  }
 
   const chain = await select({
     message: 'Which chain?',
-    hint: '↑/↓ to move, Enter to select',
     choices: TX_CHAINS,
   });
 
@@ -258,12 +251,11 @@ async function txFlow(session) {
 async function historyFlow(session) {
   const address = await input({
     message: 'Address (EVM only for v1)',
-    placeholder: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
+    placeholder: session.lastAddress || '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
+    acceptPlaceholder: true,
+    required: true,
   });
-  if (!address.trim()) {
-    console.log(c.dim('  no address provided — back to menu'));
-    return;
-  }
+  session.lastAddress = address.trim();
 
   const chain = await select({
     message: 'Which chain?',
@@ -273,8 +265,8 @@ async function historyFlow(session) {
 
   const rangeChoice = await select({
     message: 'Date range?',
-    hint: '↑/↓ to move, Enter to select',
     choices: HISTORY_RANGES,
+    initial: 2, // 365 days — labeled "Default — fits a tax year"
   });
 
   let from = null;
@@ -368,12 +360,11 @@ async function historyFlow(session) {
 async function alertFlow(session) {
   const address = await input({
     message: 'Address to monitor',
-    placeholder: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
+    placeholder: session.lastAddress || '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
+    acceptPlaceholder: true,
+    required: true,
   });
-  if (!address.trim()) {
-    console.log(c.dim('  no address provided — back to menu'));
-    return;
-  }
+  session.lastAddress = address.trim();
 
   const chain = await select({
     message: 'Which chain?',
@@ -384,31 +375,29 @@ async function alertFlow(session) {
   const condition = await input({
     message: 'Condition',
     placeholder: 'balance.eth < 300',
+    acceptPlaceholder: true,
+    required: true,
   });
-  if (!condition.trim()) {
-    console.log(c.dim('  no condition provided — back to menu'));
-    return;
-  }
 
   const webhook = await input({
     message: 'Webhook URL',
     placeholder: 'https://httpbin.org/post',
+    acceptPlaceholder: true,
+    required: true,
   });
-  if (!webhook.trim()) {
-    console.log(c.dim('  no webhook provided — back to menu'));
-    return;
-  }
 
   const dryRun = await select({
     message: 'Dry-run (evaluate without firing webhook)?',
+    hint: 'recommended for the first run',
     choices: YES_NO,
+    initial: 1, // default Yes — safer first run
   });
 
   const once = await select({
     message: 'Run once and exit, or loop forever?',
     choices: [
+      { value: false, label: 'Loop',  icon: '↻', description: 'Poll on interval until Ctrl+C (default)' },
       { value: true,  label: 'Once',  icon: '·', description: 'Evaluate one time then return to menu' },
-      { value: false, label: 'Loop',  icon: '↻', description: 'Poll on interval until Ctrl+C' },
     ],
   });
 
@@ -462,14 +451,14 @@ export async function runInteractive(version) {
   printBanner(version);
 
   // Per-session preferences. Survives across menu iterations until quit.
-  const session = { outputMode: 'pretty' };
+  const session = { outputMode: 'pretty', lastAddress: null };
 
   while (true) {
     let action;
     try {
       action = await select({
         message: `What would you like to do?  ${c.dim('[output: ' + session.outputMode + ']')}`,
-        hint: '↑/↓ to move, Enter to confirm',
+        hint: '↑/↓ move · Enter select · q quit · Ctrl+C exit',
         choices: [
           { value: 'balance', label: 'Check balance',      icon: '◈', description: 'Native + token balances, optional watch & DeFi positions' },
           { value: 'tx',      label: 'Decode transaction', icon: '⟳', description: 'Inspect a transaction by hash' },
