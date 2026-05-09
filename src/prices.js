@@ -51,8 +51,9 @@ const CHAIN_TO_PLATFORM = {
 const BATCH_SIZE = 100; // CoinGecko URL length safety limit
 
 /**
- * Fetch with exponential backoff on HTTP 429 (rate-limit).
- * Creates a fresh AbortSignal per attempt so timeout is not consumed by wait.
+ * Fetch with exponential backoff on transient failures: HTTP 429, 5xx, and
+ * thrown errors (network/timeouts). A fresh AbortSignal is created per attempt
+ * so the timeout is not consumed by the inter-attempt wait.
  *
  * @param {string} url
  * @param {number} timeoutMs  - per-attempt timeout
@@ -62,15 +63,29 @@ const BATCH_SIZE = 100; // CoinGecko URL length safety limit
 async function fetchWithRetry(url, timeoutMs, maxRetries = 3) {
   const headers = { Accept: 'application/json' };
   let delay = 1_000;
+  let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
-    if (res.status !== 429) return res;
+    let res;
+    try {
+      res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (err) {
+      // Network error / timeout / abort — retry unless we're out of attempts.
+      lastErr = err;
+      if (attempt === maxRetries) throw err;
+      await new Promise(r => setTimeout(r, delay));
+      delay *= 2;
+      continue;
+    }
+    // Success or non-transient failure (4xx other than 429) → return it.
+    if (res.status !== 429 && res.status < 500) return res;
     if (attempt === maxRetries) return res;
     const ra = res.headers.get('Retry-After');
     const wait = ra ? Math.min(Number(ra) * 1_000, 30_000) : delay;
     await new Promise(r => setTimeout(r, wait));
     delay *= 2;
   }
+  // Unreachable in practice — the loop either returns or throws above.
+  throw lastErr ?? new Error('fetchWithRetry: exhausted retries');
 }
 
 /**

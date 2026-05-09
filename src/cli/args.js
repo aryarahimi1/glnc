@@ -31,6 +31,21 @@ export class ParseError extends Error {
 }
 
 /**
+ * Parse a --interval value as a strictly positive integer. Rejects 0 and
+ * non-numeric input outright instead of silently falling back to the default.
+ *
+ * @param {string} value
+ * @returns {number}
+ */
+function parseInterval(value) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new ParseError(`--interval must be a positive integer (got: ${JSON.stringify(value)})`);
+  }
+  return n;
+}
+
+/**
  * @typedef {{
  *   command: string,
  *   address: string|null,
@@ -85,6 +100,7 @@ export function parseArgs(argv) {
   let outPath = null;
   let apiKey = null;
   let noPrices = false;
+  let showUnpriced = false;
   let helpRequested = false;
 
   // Extract flags anywhere in argv; non-flag tokens go into filtered
@@ -115,9 +131,12 @@ export function parseArgs(argv) {
     } else if (arg === '--watch' || arg === '-w') {
       watch = true;
     } else if (arg.startsWith('--interval=')) {
-      intervalRaw = parseInt(arg.slice('--interval='.length), 10) || null;
+      intervalRaw = parseInterval(arg.slice('--interval='.length));
     } else if (arg === '--interval') {
-      intervalRaw = parseInt(argv[++i], 10) || null;
+      if (i + 1 >= argv.length) {
+        throw new ParseError('--interval requires a positive integer (seconds)');
+      }
+      intervalRaw = parseInterval(argv[++i]);
     } else if (arg === '--positions' || arg === '-p') {
       positions = true;
     } else if (arg === '--nfts' || arg === '-n') {
@@ -177,6 +196,8 @@ export function parseArgs(argv) {
       apiKey = argv[++i];
     } else if (arg === '--no-prices') {
       noPrices = true;
+    } else if (arg === '--show-unpriced') {
+      showUnpriced = true;
     } else if (arg === '--help' || arg === '-h') {
       helpRequested = true;
     } else {
@@ -201,7 +222,7 @@ export function parseArgs(argv) {
     chain, json, ndjson, strict, schemaInfo,
     verbose, watch, interval, positions, nfts,
     condition, webhook, once, dryRun, rpc,
-    fromDate, toDate, outPath, apiKey, noPrices,
+    fromDate, toDate, outPath, apiKey, noPrices, showUnpriced,
     raw,
   };
 

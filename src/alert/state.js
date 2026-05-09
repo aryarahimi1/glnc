@@ -8,10 +8,11 @@
  * Mirrors src/snapshots.js exactly — uses Bun.file/Bun.write + mkdir.
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 
-const ALERTS_PATH = `${process.env.HOME}/.glnc/alerts.json`;
+const ALERTS_PATH = join(homedir(), '.glnc', 'alerts.json');
 
 /**
  * Read raw alerts file; returns {} on any error.
@@ -36,7 +37,11 @@ async function readRaw() {
 async function writeRaw(data) {
   try {
     await mkdir(dirname(ALERTS_PATH), { recursive: true });
-    await writeFile(ALERTS_PATH, JSON.stringify(data, null, 2));
+    // Atomic write: stage to a per-pid tmp then rename so concurrent
+    // `glnc alert` runs across terminals don't corrupt the JSON file.
+    const tmp = `${ALERTS_PATH}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify(data, null, 2));
+    await rename(tmp, ALERTS_PATH);
   } catch {
     // Non-fatal — silently ignore write failures
   }

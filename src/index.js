@@ -23,6 +23,7 @@
 
 import { getPrices, getTokenPrices } from './prices.js';
 import { readSnapshot, writeSnapshot } from './snapshots.js';
+import { isBitcoinLegacyChecksumValid } from './chains/_base58check.js';
 import { wrap, wrapError, wrapEvent } from './output/envelope.js';
 import { emitJSON, emitNDJSON } from './output/emit.js';
 import { SCHEMA } from './output/schemas.js';
@@ -82,8 +83,13 @@ export function detectChains(address) {
     return ['bitcoin'];
   }
 
-  // Bitcoin legacy P2PKH (starts with 1) or P2SH (starts with 3)
-  if (/^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/.test(address)) {
+  // Bitcoin legacy P2PKH (1...) or P2SH (3...). Uses base58check verification
+  // so the 32-34 char overlap with Solana pubkeys is resolved deterministically:
+  // strings that don't checksum-validate as Bitcoin fall through to Solana.
+  if (
+    /^[13][a-km-zA-HJ-NP-Z1-9]{25,33}$/.test(address) &&
+    isBitcoinLegacyChecksumValid(address)
+  ) {
     return ['bitcoin'];
   }
 
@@ -495,7 +501,9 @@ async function fetchBalances(addressInput, chainFilter, opts) {
         const tokens = entry.result.tokens ?? [];
         if (tokens.length === 0) continue;
         try {
-          entry.result.tokens = filterDust(tokens, prices);
+          entry.result.tokens = filterDust(tokens, prices, {
+            showUnpriced: !!opts?.showUnpriced,
+          });
         } catch {
           // Non-fatal
         }
@@ -1089,7 +1097,8 @@ export async function runGas(chainFilter, opts = {}) {
     } else {
       renderError(msg);
     }
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   // Spinner suppressed under any structured-output mode — its ANSI writes to
@@ -1126,7 +1135,7 @@ export async function runGas(chainFilter, opts = {}) {
 
   // Exit non-zero only if every chain failed.
   if (results.every(r => r.error)) {
-    process.exit(2);
+    process.exitCode = 2;
   }
 }
 
@@ -1184,7 +1193,8 @@ export async function runGasWatch(chainFilter, opts = {}) {
     } else {
       renderError(msg);
     }
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   const useAltScreen = !machine && (process.stdout.isTTY ?? false);

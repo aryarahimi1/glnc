@@ -20,6 +20,7 @@ import * as arbitrum from './arbitrum.js';
 import * as base     from './base.js';
 import * as solana   from './solana.js';
 import * as bitcoin  from './bitcoin.js';
+import { isBitcoinLegacyChecksumValid } from './_base58check.js';
 
 export const EVM_CHAINS = ['ethereum', 'polygon', 'arbitrum', 'base'];
 
@@ -57,11 +58,17 @@ export function detectAddressType(address) {
   // Bitcoin Bech32 (native segwit): bc1...
   if (/^bc1[0-9a-z]{6,87}$/i.test(trimmed)) return 'bitcoin';
 
-  // Bitcoin legacy / P2SH: starts with 1 or 3, base58, 25-34 chars
-  if (/^[13][1-9A-HJ-NP-Za-km-z]{24,33}$/.test(trimmed)) return 'bitcoin';
+  // Bitcoin legacy P2PKH / P2SH (1... / 3...). Uses base58check verification
+  // so the 32-34 char overlap with Solana pubkeys is resolved deterministically:
+  // a string that doesn't checksum-validate as Bitcoin falls through to Solana.
+  if (
+    /^[13][1-9A-HJ-NP-Za-km-z]{24,33}$/.test(trimmed) &&
+    isBitcoinLegacyChecksumValid(trimmed)
+  ) {
+    return 'bitcoin';
+  }
 
-  // Solana: base58 string, typically 32-44 chars, no leading 0x
-  // Base58 alphabet: 1-9A-HJ-NP-Za-km-z
+  // Solana: base58, typically 32-44 chars, no leading 0x.
   if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) return 'solana';
 
   return 'unknown';

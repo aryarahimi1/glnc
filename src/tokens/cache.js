@@ -11,11 +11,13 @@
  * Both functions are always safe to call — they NEVER throw.
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-const CACHE_DIR    = `${process.env.HOME}/.glnc`;
-const CACHE_FILE   = `${CACHE_DIR}/token-cache.json`;
+const CACHE_DIR    = join(homedir(), '.glnc');
+const CACHE_FILE   = join(CACHE_DIR, 'token-cache.json');
 
 /**
  * Read the token list from the disk cache.
@@ -68,7 +70,10 @@ export async function writeCache(data) {
     });
 
     await mkdir(CACHE_DIR, { recursive: true });
-    await writeFile(CACHE_FILE, payload);
+    // Atomic write so concurrent invocations don't tear the JSON file.
+    const tmp = `${CACHE_FILE}.${process.pid}.tmp`;
+    await writeFile(tmp, payload);
+    await rename(tmp, CACHE_FILE);
   } catch {
     // Silently swallow: disk full, permissions error, etc.
   }

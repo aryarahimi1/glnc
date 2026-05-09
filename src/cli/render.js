@@ -629,9 +629,8 @@ export function renderPositions(chainPositions, opts = {}) {
     const debt = a.debtUsd != null
       ? formatUsd(a.debtUsd)
       : '—';
-    const hf = a.healthFactor != null && isFinite(a.healthFactor)
-      ? a.healthFactor.toFixed(2)
-      : '∞';
+    // healthFactor is pre-formatted by aave.js as a string ('2.34' or '∞').
+    const hf = a.healthFactor != null ? String(a.healthFactor) : '∞';
 
     const label = padRight(theme.role.secondary('Aave V3'), 10);
     const vals =

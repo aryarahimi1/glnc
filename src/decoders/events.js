@@ -345,15 +345,17 @@ export async function decodeReceiptLogs(chain, receipt, tx, tokenMetaResolver) {
       if (topic0 === TOPIC_WETH_WITH) {
         const src = addrFromTopic(log.topics[1]);
         if (!src) continue;
-
-        // src is the contract that called withdraw (typically the router)
-        // Only emit if user is the tx.from
         if (user === '') continue;
+
+        // Only synthesize ETH-in when the user themselves called withdraw.
+        // Router-mediated unwraps (src=router) cannot be confirmed without
+        // internal-tx data; emitting them was over-attributing native ETH
+        // receipts to users on every router swap that ended in unwrap.
+        if (src.toLowerCase() !== user) continue;
 
         const wad    = decodeUint256(log.data);
         const amount = fmtAmount(wad, 18);
 
-        // Synthetic ETH-in: user received ETH from an unwrap
         tokenMovements.push({
           direction:        'in',
           amount,

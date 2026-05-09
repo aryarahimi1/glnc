@@ -23,11 +23,29 @@ describe('detectAddressType', () => {
   });
 
   it('detects Bitcoin P2PKH address', () => {
-    assert.equal(detectAddressType('1A1zP1eP5QGefi2DMPTfTL5SLmv7Divfna'), 'bitcoin');
+    // Canonical genesis-block coinbase address (1A1z...DivfNa with capital N).
+    // base58check checksum is verified by the detector, so a typo'd version
+    // (e.g. trailing "Divfna" lowercase) would fall through to Solana — that
+    // is the intended behavior since Bitcoin pubkey hashes that don't
+    // checksum-validate are not real addresses.
+    assert.equal(detectAddressType('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa'), 'bitcoin');
+  });
+
+  it('detects Bitcoin P2SH address', () => {
+    // Canonical example P2SH address (3...).
+    assert.equal(detectAddressType('3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy'), 'bitcoin');
   });
 
   it('detects Solana address', () => {
     assert.equal(detectAddressType('9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM'), 'solana');
+  });
+
+  it('detects Solana address starting with 1 (would have collided with Bitcoin legacy)', () => {
+    // 32-44 char base58 starting with '1' is the exact ambiguity range where
+    // pre-base58check detection would misclassify as Bitcoin. Random Solana
+    // pubkeys with this shape are common; checksum validation rules them out
+    // as Bitcoin and they correctly land on Solana.
+    assert.equal(detectAddressType('1nc1nerator11111111111111111111111111111111'), 'solana');
   });
 
   it('returns unknown for empty string', () => {

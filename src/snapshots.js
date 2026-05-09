@@ -10,10 +10,11 @@
  *   Map key format: 'chain:SYMBOL'  (e.g. 'ethereum:ETH', 'polygon:USDC')
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 
-const SNAPSHOT_PATH = `${process.env.HOME}/.glnc/snapshots.json`;
+const SNAPSHOT_PATH = join(homedir(), '.glnc', 'snapshots.json');
 
 const SNAPSHOT_TTL_MS = 7 * 24 * 60 * 60 * 1_000; // 7 days
 
@@ -72,7 +73,11 @@ function pruneStale(data) {
 async function writeRaw(data) {
   try {
     await mkdir(dirname(SNAPSHOT_PATH), { recursive: true });
-    await writeFile(SNAPSHOT_PATH, JSON.stringify(pruneStale(data), null, 2));
+    // Atomic write: stage to a per-pid tmp then rename. Concurrent `glnc`
+    // invocations across terminals would otherwise race on the JSON file.
+    const tmp = `${SNAPSHOT_PATH}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify(pruneStale(data), null, 2));
+    await rename(tmp, SNAPSHOT_PATH);
   } catch {
     // Non-fatal — silently ignore write failures
   }
