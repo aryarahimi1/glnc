@@ -8,12 +8,111 @@
  *   getUniswapV3Positions(address, chain) → Promise<UniswapResult>
  */
 
-import { createPublicClient, http } from 'viem';
+import { createPublicClient, http, formatUnits } from 'viem';
 import { mainnet } from 'viem/chains';
 import { polygon } from 'viem/chains';
 import { arbitrum } from 'viem/chains';
 import { base } from 'viem/chains';
 import { fetchTokenMeta } from '../chains/_evm.js';
+
+// ─── Uniswap V3 Factory (same address on Ethereum, Polygon, Arbitrum, Base) ───
+const V3_FACTORY = '0x1F98431c8aD98523631AE4a59f267346ea31F984';
+
+const FACTORY_ABI = [
+  {
+    name: 'getPool',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'tokenA', type: 'address' },
+      { name: 'tokenB', type: 'address' },
+      { name: 'fee',    type: 'uint24'  },
+    ],
+    outputs: [{ name: 'pool', type: 'address' }],
+  },
+];
+
+const POOL_ABI = [
+  {
+    name: 'slot0',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [
+      { name: 'sqrtPriceX96',               type: 'uint160' },
+      { name: 'tick',                       type: 'int24'   },
+      { name: 'observationIndex',           type: 'uint16'  },
+      { name: 'observationCardinality',     type: 'uint16'  },
+      { name: 'observationCardinalityNext', type: 'uint16'  },
+      { name: 'feeProtocol',                type: 'uint8'   },
+      { name: 'unlocked',                   type: 'bool'    },
+    ],
+  },
+];
+
+// ─── Inline TickMath (Uniswap V3) ─────────────────────────────────────────────
+// Computes sqrtPriceX96 = sqrt(1.0001^tick) * 2^96 using the canonical
+// magic-multiplier algorithm from Uniswap V3's TickMath.sol. BigInt only.
+
+const Q96 = 1n << 96n;
+
+function getSqrtRatioAtTick(tick) {
+  const absTick = tick < 0 ? -tick : tick;
+  if (absTick > 887272) throw new Error('tick out of range');
+  let ratio = (absTick & 0x1) !== 0
+    ? 0xfffcb933bd6fad37aa2d162d1a594001n
+    : 0x100000000000000000000000000000000n;
+  if ((absTick & 0x2)     !== 0) ratio = (ratio * 0xfff97272373d413259a46990580e213an) >> 128n;
+  if ((absTick & 0x4)     !== 0) ratio = (ratio * 0xfff2e50f5f656932ef12357cf3c7fdccn) >> 128n;
+  if ((absTick & 0x8)     !== 0) ratio = (ratio * 0xffe5caca7e10e4e61c3624eaa0941cd0n) >> 128n;
+  if ((absTick & 0x10)    !== 0) ratio = (ratio * 0xffcb9843d60f6159c9db58835c926644n) >> 128n;
+  if ((absTick & 0x20)    !== 0) ratio = (ratio * 0xff973b41fa98c081472e6896dfb254c0n) >> 128n;
+  if ((absTick & 0x40)    !== 0) ratio = (ratio * 0xff2ea16466c96a3843ec78b326b52861n) >> 128n;
+  if ((absTick & 0x80)    !== 0) ratio = (ratio * 0xfe5dee046a99a2a811c461f1969c3053n) >> 128n;
+  if ((absTick & 0x100)   !== 0) ratio = (ratio * 0xfcbe86c7900a88aedcffc83b479aa3a4n) >> 128n;
+  if ((absTick & 0x200)   !== 0) ratio = (ratio * 0xf987a7253ac413176f2b074cf7815e54n) >> 128n;
+  if ((absTick & 0x400)   !== 0) ratio = (ratio * 0xf3392b0822b70005940c7a398e4b70f3n) >> 128n;
+  if ((absTick & 0x800)   !== 0) ratio = (ratio * 0xe7159475a2c29b7443b29c7fa6e889d9n) >> 128n;
+  if ((absTick & 0x1000)  !== 0) ratio = (ratio * 0xd097f3bdfd2022b8845ad8f792aa5825n) >> 128n;
+  if ((absTick & 0x2000)  !== 0) ratio = (ratio * 0xa9f746462d870fdf8a65dc1f90e061e5n) >> 128n;
+  if ((absTick & 0x4000)  !== 0) ratio = (ratio * 0x70d869a156d2a1b890bb3df62baf32f7n) >> 128n;
+  if ((absTick & 0x8000)  !== 0) ratio = (ratio * 0x31be135f97d08fd981231505542fcfa6n) >> 128n;
+  if ((absTick & 0x10000) !== 0) ratio = (ratio * 0x9aa508b5b7a84e1c677de54f3e99bc9n)  >> 128n;
+  if ((absTick & 0x20000) !== 0) ratio = (ratio * 0x5d6af8dedb81196699c329225ee604n)   >> 128n;
+  if ((absTick & 0x40000) !== 0) ratio = (ratio * 0x2216e584f5fa1ea926041bedfe98n)     >> 128n;
+  if ((absTick & 0x80000) !== 0) ratio = (ratio * 0x48a170391f7dc42444e8fa2n)          >> 128n;
+  if (tick > 0) ratio = ((1n << 256n) - 1n) / ratio;
+  return (ratio >> 32n) + (ratio % (1n << 32n) === 0n ? 0n : 1n);
+}
+
+function getAmount0(sqrtA, sqrtB, L) {
+  if (sqrtA > sqrtB) [sqrtA, sqrtB] = [sqrtB, sqrtA];
+  return (L * Q96 * (sqrtB - sqrtA)) / (sqrtB * sqrtA);
+}
+
+function getAmount1(sqrtA, sqrtB, L) {
+  if (sqrtA > sqrtB) [sqrtA, sqrtB] = [sqrtB, sqrtA];
+  return (L * (sqrtB - sqrtA)) / Q96;
+}
+
+/**
+ * Compute token0/token1 amounts owned by an LP position given current pool
+ * sqrtPrice and the position's tick range + liquidity.
+ */
+function computeAmounts(sqrtPriceX96, tickLower, tickUpper, liquidity) {
+  const sqrtA = getSqrtRatioAtTick(tickLower);
+  const sqrtB = getSqrtRatioAtTick(tickUpper);
+  if (sqrtPriceX96 <= sqrtA) {
+    return { amount0: getAmount0(sqrtA, sqrtB, liquidity), amount1: 0n };
+  }
+  if (sqrtPriceX96 >= sqrtB) {
+    return { amount0: 0n, amount1: getAmount1(sqrtA, sqrtB, liquidity) };
+  }
+  return {
+    amount0: getAmount0(sqrtPriceX96, sqrtB, liquidity),
+    amount1: getAmount1(sqrtA, sqrtPriceX96, liquidity),
+  };
+}
 
 // ─── NonfungiblePositionManager addresses ─────────────────────────────────────
 // Same address on Ethereum, Polygon, and Arbitrum; different on Base.
@@ -131,6 +230,9 @@ function getClient(chain) {
  *   feeStr: string,
  *   hasLiquidity: boolean,
  *   liquidity: string,
+ *   amount0?: string,
+ *   amount1?: string,
+ *   inRange?: boolean,
  * }} UniswapPosition
  *
  * @typedef {{
@@ -237,6 +339,61 @@ export async function getUniswapV3Positions(address, chain) {
       })
     );
 
+    // ── Step 4b: Resolve pool slot0 for each unique (token0,token1,fee) ──────
+    // Two-phase: first resolve unique pool addresses via factory.getPool,
+    // then batch-fetch slot0 for each. If any lookup fails, that position
+    // simply falls back to the old hasLiquidity heuristic.
+    const poolKey = (a, b, f) => `${a.toLowerCase()}-${b.toLowerCase()}-${f}`;
+    const poolRequests = new Map(); // key → { token0, token1, fee }
+    for (const res of positionResults) {
+      if (res.status !== 'success' || !res.result) continue;
+      const [, , t0, t1, f] = res.result;
+      if (!t0 || !t1) continue;
+      const k = poolKey(t0, t1, f);
+      if (!poolRequests.has(k)) poolRequests.set(k, { token0: t0, token1: t1, fee: f });
+    }
+
+    const poolAddrMap = new Map(); // key → pool address (or null)
+    const poolKeys = [...poolRequests.keys()];
+    const poolAddrResults = await Promise.allSettled(
+      poolKeys.map(k => {
+        const { token0, token1, fee } = poolRequests.get(k);
+        return client.readContract({
+          address: V3_FACTORY,
+          abi: FACTORY_ABI,
+          functionName: 'getPool',
+          args: [token0, token1, fee],
+        });
+      })
+    );
+    for (let i = 0; i < poolKeys.length; i++) {
+      const r = poolAddrResults[i];
+      const addr = r.status === 'fulfilled' ? r.value : null;
+      // Treat zero address as "no pool".
+      poolAddrMap.set(
+        poolKeys[i],
+        addr && addr !== '0x0000000000000000000000000000000000000000' ? addr : null,
+      );
+    }
+
+    const slot0Map = new Map(); // pool address (lowercase) → sqrtPriceX96 BigInt
+    const uniquePools = [...new Set([...poolAddrMap.values()].filter(Boolean))];
+    const slot0Results = await Promise.allSettled(
+      uniquePools.map(addr =>
+        client.readContract({
+          address: addr,
+          abi: POOL_ABI,
+          functionName: 'slot0',
+        })
+      )
+    );
+    for (let i = 0; i < uniquePools.length; i++) {
+      const r = slot0Results[i];
+      if (r.status === 'fulfilled' && r.value) {
+        slot0Map.set(uniquePools[i].toLowerCase(), r.value[0]);
+      }
+    }
+
     // ── Step 5: Assemble position objects ─────────────────────────────────────
     const positions = [];
 
@@ -250,8 +407,8 @@ export async function getUniswapV3Positions(address, chain) {
         token0,
         token1,
         fee,
-        _tickLower,
-        _tickUpper,
+        tickLower,
+        tickUpper,
         liquidity,
       ] = res.result;
 
@@ -264,14 +421,58 @@ export async function getUniswapV3Positions(address, chain) {
       const feeNum = Number(fee);
       const feeStr = FEE_TIER_STR[feeNum] ?? `${(feeNum / 10000).toFixed(4)}%`;
 
+      // Try to compute live amounts from pool slot0 + tick range + liquidity.
+      // Fall back to the old liquidity-only heuristic if anything's missing.
+      const pool = poolAddrMap.get(poolKey(token0, token1, fee));
+      const sqrtPriceX96 = pool ? slot0Map.get(pool.toLowerCase()) : undefined;
+
+      let amount0Str;
+      let amount1Str;
+      let hasLiquidity;
+      let inRange;
+
+      let decimalsUnknown;
+      if (sqrtPriceX96 != null && liquidity > 0n) {
+        try {
+          const tl = Number(tickLower);
+          const tu = Number(tickUpper);
+          const { amount0, amount1 } = computeAmounts(sqrtPriceX96, tl, tu, liquidity);
+          // If either token's decimals couldn't be read on-chain, the
+          // formatUnits result would be misleading by orders of magnitude;
+          // emit raw integer amounts and flag the position so consumers
+          // don't divide by an assumed 1e18 they shouldn't trust.
+          const d0 = t0Meta?.decimals;
+          const d1 = t1Meta?.decimals;
+          if (d0 == null || d1 == null) {
+            amount0Str = amount0.toString();
+            amount1Str = amount1.toString();
+            decimalsUnknown = true;
+          } else {
+            amount0Str = formatUnits(amount0, d0);
+            amount1Str = formatUnits(amount1, d1);
+          }
+          hasLiquidity = amount0 > 0n || amount1 > 0n;
+          inRange = sqrtPriceX96 > getSqrtRatioAtTick(tl)
+                 && sqrtPriceX96 < getSqrtRatioAtTick(tu);
+        } catch {
+          hasLiquidity = liquidity > 0n;
+        }
+      } else {
+        hasLiquidity = liquidity > 0n;
+      }
+
       positions.push({
         tokenId:      tokenIds[i].toString(),
         token0Symbol,
         token1Symbol,
         fee:          feeNum,
         feeStr,
-        hasLiquidity: liquidity > 0n,
+        hasLiquidity,
         liquidity:    liquidity.toString(),
+        ...(amount0Str !== undefined ? { amount0: amount0Str } : {}),
+        ...(amount1Str !== undefined ? { amount1: amount1Str } : {}),
+        ...(inRange    !== undefined ? { inRange }              : {}),
+        ...(decimalsUnknown            ? { decimalsUnknown: true } : {}),
       });
     }
 

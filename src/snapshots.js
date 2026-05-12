@@ -18,6 +18,14 @@ const SNAPSHOT_PATH = join(homedir(), '.glnc', 'snapshots.json');
 
 const SNAPSHOT_TTL_MS = 7 * 24 * 60 * 60 * 1_000; // 7 days
 
+// Single-slot mutex for in-process RMW on the snapshots.json file.
+let writeChain = Promise.resolve();
+function withWriteLock(fn) {
+  const next = writeChain.then(fn, fn);
+  writeChain = next.catch(() => {});
+  return next;
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -127,42 +135,44 @@ export async function readSnapshot(address) {
  * @returns {Promise<void>}
  */
 export async function writeSnapshot(address, results) {
-  try {
-    const raw = await readRaw();
-    const key = address.toLowerCase();
-    const addrData = raw[key] ?? {};
-    const now = Date.now();
+  return withWriteLock(async () => {
+    try {
+      const raw = await readRaw();
+      const key = address.toLowerCase();
+      const addrData = raw[key] ?? {};
+      const now = Date.now();
 
-    for (const { chain, result, error } of results) {
-      if (error || !result || result.error) continue;
+      for (const { chain, result, error } of results) {
+        if (error || !result || result.error) continue;
 
-      const chainData = addrData[chain] ?? {};
+        const chainData = addrData[chain] ?? {};
 
-      // Native asset
-      if (result.native?.symbol && result.native?.amount != null) {
-        const sym = result.native.symbol.toUpperCase();
-        chainData[sym] = {
-          amount: String(result.native.amount),
-          timestamp: now,
-        };
+        // Native asset
+        if (result.native?.symbol && result.native?.amount != null) {
+          const sym = result.native.symbol.toUpperCase();
+          chainData[sym] = {
+            amount: String(result.native.amount),
+            timestamp: now,
+          };
+        }
+
+        // ERC-20 / SPL tokens
+        for (const token of result.tokens ?? []) {
+          if (!token.symbol || token.amount == null) continue;
+          const sym = token.symbol.toUpperCase();
+          chainData[sym] = {
+            amount: String(token.amount),
+            timestamp: now,
+          };
+        }
+
+        addrData[chain] = chainData;
       }
 
-      // ERC-20 / SPL tokens
-      for (const token of result.tokens ?? []) {
-        if (!token.symbol || token.amount == null) continue;
-        const sym = token.symbol.toUpperCase();
-        chainData[sym] = {
-          amount: String(token.amount),
-          timestamp: now,
-        };
-      }
-
-      addrData[chain] = chainData;
+      raw[key] = addrData;
+      await writeRaw(raw);
+    } catch {
+      // Non-fatal
     }
-
-    raw[key] = addrData;
-    await writeRaw(raw);
-  } catch {
-    // Non-fatal
-  }
+  });
 }

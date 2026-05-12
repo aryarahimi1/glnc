@@ -47,12 +47,17 @@ const CHAIN_NATIVE_SYMBOL = {
 const priceCache = new Map();
 
 const MIN_REQUEST_GAP_MS = 600;
-let lastRequestAt = 0;
-
-async function rateLimitGate() {
-  const wait = lastRequestAt + MIN_REQUEST_GAP_MS - Date.now();
-  if (wait > 0) await new Promise(r => setTimeout(r, wait));
-  lastRequestAt = Date.now();
+// Chained-promise queue so concurrent callers serialize through the gate instead of all firing at once.
+let _gateChain = Promise.resolve();
+let _lastRequestAt = 0;
+function rateLimitGate() {
+  const next = _gateChain.then(async () => {
+    const wait = _lastRequestAt + MIN_REQUEST_GAP_MS - Date.now();
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    _lastRequestAt = Date.now();
+  });
+  _gateChain = next.catch(() => {});
+  return next;
 }
 
 /**

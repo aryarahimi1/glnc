@@ -11,6 +11,16 @@ import { formatUnits } from 'viem';
 const APPROVE_SELECTOR = '0x095ea7b3'; // ERC20 approve(address,uint256)
 const NATIVE_DECIMALS = 18;
 
+// We anchor wraps/unwraps to the canonical wrapped-native contract addresses
+// (lowercased), not a symbol prefix — "WLD", "WIF", "WOO" etc. are not wraps.
+// Other chains are intentionally not classified as wrap/unwrap.
+const WRAPPED_NATIVE = {
+  ethereum: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+  polygon:  '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270',
+  arbitrum: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1',
+  base:     '0x4200000000000000000000000000000000000006',
+};
+
 /**
  * Native gas-token symbol for a given chain.
  * @param {string} chain
@@ -137,11 +147,13 @@ function classifyOne({ chain, address, hash, normals, internals, tokens }) {
     return row;
   }
 
-  // Wrap — user sent native AND received a W* token from the same contract.
-  if (userIsSender && nativeSentByUser > 0n && tokenIns.length === 1) {
+  const wrappedNative = WRAPPED_NATIVE[chain] ?? null;
+
+  // Wrap — user sent native AND received the canonical wrapped-native token.
+  if (userIsSender && nativeSentByUser > 0n && tokenIns.length === 1 && wrappedNative) {
     const got = tokenIns[0];
-    const sym = (got.tokenSymbol ?? '').toUpperCase();
-    if (sym.startsWith('W') && got.contractAddress === (normalTx?.to ?? null)) {
+    const gotContract = (got.contractAddress ?? '').toLowerCase();
+    if (gotContract === wrappedNative && gotContract === (normalTx?.to ?? '').toLowerCase()) {
       row.type      = 'wrap';
       row.tokenIn   = native;
       row.amountIn  = formatUnits(nativeSentByUser, NATIVE_DECIMALS);
@@ -152,11 +164,11 @@ function classifyOne({ chain, address, hash, normals, internals, tokens }) {
     }
   }
 
-  // Unwrap — user sent W* and received native via internal tx.
-  if (userIsSender && tokenOuts.length === 1 && nativeReceivedByUser > 0n) {
+  // Unwrap — user sent canonical wrapped-native and received native via internal tx.
+  if (userIsSender && tokenOuts.length === 1 && nativeReceivedByUser > 0n && wrappedNative) {
     const sent = tokenOuts[0];
-    const sym  = (sent.tokenSymbol ?? '').toUpperCase();
-    if (sym.startsWith('W') && sent.to === (normalTx?.to ?? null)) {
+    const sentContract = (sent.contractAddress ?? '').toLowerCase();
+    if (sentContract === wrappedNative && (sent.to ?? '').toLowerCase() === (normalTx?.to ?? '').toLowerCase()) {
       row.type      = 'unwrap';
       row.tokenIn   = sent.tokenSymbol ?? null;
       row.amountIn  = fmt(sent.value, sent.tokenDecimal);

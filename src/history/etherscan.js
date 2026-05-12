@@ -20,12 +20,17 @@ const PAGE_SIZE = 10000;
 const MAX_ROWS_PER_ACTION = 10000;
 
 const MIN_REQUEST_GAP_MS = 200;
-let lastRequestAt = 0;
-
-async function rateLimitGate() {
-  const wait = lastRequestAt + MIN_REQUEST_GAP_MS - Date.now();
-  if (wait > 0) await new Promise(r => setTimeout(r, wait));
-  lastRequestAt = Date.now();
+// Chained-promise queue so concurrent callers serialize through the gate instead of all firing at once.
+let _gateChain = Promise.resolve();
+let _lastRequestAt = 0;
+function rateLimitGate() {
+  const next = _gateChain.then(async () => {
+    const wait = _lastRequestAt + MIN_REQUEST_GAP_MS - Date.now();
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    _lastRequestAt = Date.now();
+  });
+  _gateChain = next.catch(() => {});
+  return next;
 }
 
 function chainIdFor(chain) {
@@ -119,6 +124,10 @@ async function fetchPaged(chain, action, address, startBlock, endBlock, opts = {
   const chainId = chainIdFor(chain);
   const addrLc  = address.toLowerCase();
   const out = [];
+  // Dedup keys: txlist/txlistinternal share `hash` (internals add traceId when present
+  // to distinguish multiple internal calls inside one tx); tokentx uses hash+logIndex
+  // (transactionIndex fallback) because one tx can emit multiple Transfer events.
+  const seen = new Set();
   let page = 1;
   let truncated = false;
 
@@ -146,18 +155,38 @@ async function fetchPaged(chain, action, address, startBlock, endBlock, opts = {
     }
 
     const result = Array.isArray(data.result) ? data.result : [];
-    for (const r of result) out.push(normalizeRow(r, action));
+    for (const r of result) {
+      const row = normalizeRow(r, action);
+      const key = dedupKey(row, action);
+      if (key !== null && seen.has(key)) continue;
+      if (key !== null) seen.add(key);
+      out.push(row);
+    }
 
     if (result.length < PAGE_SIZE) break;
     if (out.length >= MAX_ROWS_PER_ACTION) {
       truncated = true;
-      opts.onWarn?.(`etherscan ${action}: truncated at ${MAX_ROWS_PER_ACTION} rows for ${addrLc}`);
+      opts.onWarn?.(`etherscan ${action}: truncated at ${MAX_ROWS_PER_ACTION} rows for ${addrLc}; narrow --from/--to to retrieve all rows`);
       break;
     }
     page += 1;
   }
 
   return { rows: out, truncated, error: null };
+}
+
+// Stable identity for a row within a single action's result stream.
+// Returns null only if the row lacks the fields we'd key on (shouldn't happen
+// for valid Etherscan responses, but we'd rather keep the row than crash).
+function dedupKey(row, action) {
+  if (action === 'tokentx') {
+    const sub = row.logIndex ?? row.transactionIndex;
+    return row.hash ? `${row.hash}:${sub ?? ''}` : null;
+  }
+  if (action === 'txlistinternal') {
+    return row.hash ? `${row.hash}:${row.traceId ?? ''}` : null;
+  }
+  return row.hash ?? null;
 }
 
 // Lowercase address-like fields for consistent matching downstream;

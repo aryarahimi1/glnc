@@ -139,8 +139,15 @@ export async function reverseResolveAddress(address) {
   try {
     // viem's getEnsName requires a checksummed address
     const checksummed = getAddress(address);
-    const name = await getClient().getEnsName({ address: checksummed });
-    return name ?? null;
+    const client = getClient();
+    const name = await client.getEnsName({ address: checksummed });
+    if (!name) return null;
+    // ENS spec: confirm the reverse by forward-resolving and matching the address.
+    const forwardAddr = await client.getEnsAddress({ name });
+    if (!forwardAddr || forwardAddr.toLowerCase() !== checksummed.toLowerCase()) {
+      return null;
+    }
+    return name;
   } catch {
     return null;
   }

@@ -18,19 +18,26 @@ import * as ethereum from './ethereum.js';
 import * as polygon  from './polygon.js';
 import * as arbitrum from './arbitrum.js';
 import * as base     from './base.js';
+import * as optimism from './optimism.js';
+import * as linea    from './linea.js';
+import * as zksync   from './zksync.js';
 import * as solana   from './solana.js';
 import * as bitcoin  from './bitcoin.js';
 import { isBitcoinLegacyChecksumValid } from './_base58check.js';
+import { isBitcoinBech32Valid } from './_bech32.js';
 
-export const EVM_CHAINS = ['ethereum', 'polygon', 'arbitrum', 'base'];
+export const EVM_CHAINS = ['ethereum', 'polygon', 'arbitrum', 'base', 'optimism', 'linea', 'zksync'];
 
-const EVM_ADAPTERS = [ethereum, polygon, arbitrum, base];
+const EVM_ADAPTERS = [ethereum, polygon, arbitrum, base, optimism, linea, zksync];
 
 const ALL_ADAPTERS = {
   ethereum,
   polygon,
   arbitrum,
   base,
+  optimism,
+  linea,
+  zksync,
   solana,
   bitcoin,
 };
@@ -56,7 +63,9 @@ export function detectAddressType(address) {
   if (/^0x[0-9a-fA-F]{40}$/.test(trimmed)) return 'evm';
 
   // Bitcoin Bech32 (native segwit): bc1...
-  if (/^bc1[0-9a-z]{6,87}$/i.test(trimmed)) return 'bitcoin';
+  if (/^bc1[0-9a-z]{6,87}$/i.test(trimmed) && isBitcoinBech32Valid(trimmed)) {
+    return 'bitcoin';
+  }
 
   // Bitcoin legacy P2PKH / P2SH (1... / 3...). Uses base58check verification
   // so the 32-34 char overlap with Solana pubkeys is resolved deterministically:

@@ -83,7 +83,8 @@ function formatSol(lamports) {
 function formatSpl(amount, decimals) {
   // amount is a string representing u64
   const big = BigInt(amount);
-  const divisor = BigInt(10 ** decimals);
+  if (decimals === 0) return big.toString();
+  const divisor = 10n ** BigInt(decimals);
   const whole = big / divisor;
   const frac = big % divisor;
   return `${whole}.${frac.toString().padStart(decimals, '0')}`;
@@ -102,11 +103,17 @@ function formatSpl(amount, decimals) {
  */
 export async function getBalances(address) {
   try {
-    const [balResult, splResult] = await Promise.all([
+    const [balResult, splResult, spl22Result] = await Promise.all([
       rpcCall('getBalance', [address, { commitment: 'confirmed' }]),
       rpcCall('getTokenAccountsByOwner', [
         address,
         { programId: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' },
+        { encoding: 'jsonParsed', commitment: 'confirmed' },
+      ]),
+      // Token-2022 program ID — PYUSD and Wormhole-wrapped tokens live here
+      rpcCall('getTokenAccountsByOwner', [
+        address,
+        { programId: 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb' },
         { encoding: 'jsonParsed', commitment: 'confirmed' },
       ]),
     ]);
@@ -115,7 +122,7 @@ export async function getBalances(address) {
     const nativeAmount = formatSol(nativeLamports);
 
     const tokens = [];
-    for (const acct of splResult?.value ?? []) {
+    for (const acct of [...(splResult?.value ?? []), ...(spl22Result?.value ?? [])]) {
       const parsed = acct?.account?.data?.parsed?.info;
       if (!parsed) continue;
 

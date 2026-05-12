@@ -892,14 +892,15 @@ export function renderWatchHeader(addresses, intervalSecs, lastRefreshMs) {
 
 /**
  * Look up a known contract name by address from the decoder registry.
- * Returns null if unknown.
+ * Returns null if unknown or chain is not provided.
  *
  * @param {string} addr
+ * @param {string} chain  - canonical chain name ('ethereum' | 'polygon' | …)
  * @returns {string|null}
  */
-function contractName(addr) {
-  if (!addr) return null;
-  return KNOWN_CONTRACTS[addr.toLowerCase()] ?? null;
+function contractName(addr, chain) {
+  if (!addr || !chain) return null;
+  return KNOWN_CONTRACTS[chain]?.[addr.toLowerCase()] ?? null;
 }
 
 /**
@@ -964,8 +965,8 @@ export function renderTxMeta(tx, opts = {}) {
 
   const fromAddr  = formatAddress(tx.from ?? '—', opts);
   const toAddr    = formatAddress(tx.to   ?? '—', opts);
-  const fromLabel = tx.fromName ?? contractName(tx.from);
-  const toLabel   = tx.toName   ?? contractName(tx.to);
+  const fromLabel = tx.fromName ?? contractName(tx.from, tx.chain);
+  const toLabel   = tx.toName   ?? contractName(tx.to,   tx.chain);
 
   const labelW = 7;
   const field = (label, value) => {
@@ -1139,8 +1140,8 @@ export function renderTxMovements(tx, opts = {}) {
     // since we may be inspecting someone else's transaction.
     const senderRaw   = tx.from ?? '';
     const senderTrunc = senderRaw ? formatAddress(senderRaw, opts) : '—';
-    const senderLabel = !opts.verbose && (tx.fromName || contractName(senderRaw))
-      ? (tx.fromName ?? contractName(senderRaw))
+    const senderLabel = !opts.verbose && (tx.fromName || contractName(senderRaw, tx.chain))
+      ? (tx.fromName ?? contractName(senderRaw, tx.chain))
       : senderTrunc;
 
     for (const mv of movements) {
@@ -1436,7 +1437,7 @@ export function renderGas(results, prices, opts = {}) {
   // ── EVM table ──────────────────────────────────────────────────────────────
   if (evmResults.length > 0) {
     console.log('');
-    const headers = ['Chain', 'Base', 'Priority', 'Next', '+5 blk', '+20 blk', 'Trend', 'Send (21k)'];
+    const headers = ['Chain', 'Base', 'Priority', 'Next', 'Max +5', 'Max +20', 'Trend', 'Send (21k)'];
     const rows = [];
 
     for (const r of evmResults) {
@@ -1453,8 +1454,9 @@ export function renderGas(results, prices, opts = {}) {
       const baseStr  = fmtGwei(r.baseFeeGwei);
       const prioStr  = r.priorityGwei ? fmtGwei(r.priorityGwei.med)        : '—';
       const nextStr  = r.nextBlock    ? fmtGwei(r.nextBlock.totalGwei)     : '—';
-      const blk5Str  = r.blocks5      ? fmtGwei(r.blocks5.totalGwei)       : c.dim('—');
-      const blk20Str = r.blocks20     ? fmtGwei(r.blocks20.totalGwei)      : c.dim('—');
+      // Max +5 / Max +20 = EIP-1559 worst-case ceiling (1.125^n, every block full).
+      const blk5Str  = r.worstCase5   ? fmtGwei(r.worstCase5.totalGwei)    : c.dim('—');
+      const blk20Str = r.worstCase20  ? fmtGwei(r.worstCase20.totalGwei)   : c.dim('—');
 
       const sparkBar  = sparkline(r.sparkline);
       const sparkCell = sparkBar.length > 0
@@ -1514,7 +1516,24 @@ export function renderGas(results, prices, opts = {}) {
   const hasL2 = evmResults.some(r => r.isL2 && !r.error);
   if (hasL2) {
     console.log('');
-    console.log('  ' + c.dim('L2 chains show execution fee only; small L1 data fee adds extra per tx.'));
+    console.log('  ' + c.dim('L2 totals above are execution-only. OP Stack L1 data fee per typical tx:'));
+    for (const r of evmResults) {
+      if (r.error || !r.isL2) continue;
+      const labelInfo = GAS_CHAIN_LABEL[r.chain] ?? { glyph: '●', short: r.chain.toUpperCase() };
+      const tag = '    ' + theme.role.accent(labelInfo.glyph) + ' ' + c.bold(labelInfo.short.padEnd(5));
+      if (r.l1FeeWei === 'unsupported') {
+        console.log(`${tag}  ${c.dim('L1 fee not modeled — total above is L2 execution only')}`);
+        continue;
+      }
+      if (r.l1FeeWei == null) {
+        console.log(`${tag}  ${c.dim('L1 fee unavailable (oracle RPC failed)')}`);
+        continue;
+      }
+      const eth = Number(r.l1FeeWei) / 1e18;
+      const price = prices?.[r.nativeSymbol] ?? null;
+      const usd = price != null && price > 0 ? fmtUsdCost(eth * price) : c.dim('—');
+      console.log(`${tag}  ${c.dim('L1 data:')} ${eth.toExponential(2)} ETH  ${usd}`);
+    }
   }
 
   // ── Degraded / RPC fallback note ───────────────────────────────────────────

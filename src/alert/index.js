@@ -12,9 +12,10 @@ import { readAlertState, writeAlertState } from './state.js';
 import { getPrices } from '../prices.js';
 import { getAavePositions } from '../positions/aave.js';
 import { detectChains } from '../index.js';
+import { BALANCE_SUPPORTED_CHAINS } from '../cli/args.js';
 import { c } from '../cli/render.js';
 import { wrapEvent, wrapError } from '../output/envelope.js';
-import { emitJSON, emitNDJSON } from '../output/emit.js';
+import { emitNDJSON } from '../output/emit.js';
 import { SCHEMA } from '../output/schemas.js';
 
 // ---------------------------------------------------------------------------
@@ -156,9 +157,6 @@ async function runIteration(rawAddress, opts) {
   let chain = opts.chain;
   if (!chain) {
     const detected = detectChains(resolvedAddress);
-    const evmChains = detected.filter(c =>
-      ['ethereum', 'polygon', 'arbitrum', 'base'].includes(c)
-    );
     // For EVM addresses auto-detect returns multiple chains; require --chain
     if (detected.length > 1) {
       emitErr('ambiguous-chain',
@@ -178,6 +176,12 @@ async function runIteration(rawAddress, opts) {
   const adapter = await loadChainAdapter(chain);
   if (!adapter) {
     emitErr('no-adapter', `No chain adapter found for "${chain}".`);
+    return { exitCode: 2 };
+  }
+  if (!BALANCE_SUPPORTED_CHAINS.includes(chain)) {
+    emitErr('unsupported-chain',
+      `alert is not supported on "${chain}". ` +
+      `Supported: ${BALANCE_SUPPORTED_CHAINS.join(', ')}.`);
     return { exitCode: 2 };
   }
 
@@ -378,7 +382,7 @@ export async function runAlert(address, opts) {
     parsedCondition = parseCondition(condition);
   } catch (err) {
     if (json) {
-      emitJSON(wrapError(SCHEMA.ALERT, err.message, { code: 'parse-error' }));
+      emitNDJSON(wrapError(SCHEMA.ALERT, err.message, { code: 'parse-error' }));
     } else {
       process.stderr.write(c.red('Error:') + ` ${err.message}\n`);
     }

@@ -54,7 +54,26 @@ const L2_CHAINS = new Set(['arbitrum', 'base', 'optimism', 'zksync', 'linea']);
 const FEE_HISTORY_BLOCKS    = 64;
 const REWARD_PERCENTILES    = [10, 50, 90];
 const SPARKLINE_POINTS      = 12;
+// EIP-1559 upper bound: base fee can rise at most 12.5% per block (when the
+// previous block was 100% full). This is a ceiling, NOT a forecast.
 const MAX_INCREASE_PER_BLOCK = 1.125;
+
+// OP Stack L1 gas-price oracle predeploy (Optimism, Base). Exposes
+// getL1Fee(bytes) returning the L1 data-posting fee in wei for given calldata.
+const OP_STACK_L1_GAS_ORACLE = '0x420000000000000000000000000000000000000F';
+const OP_STACK_GAS_ORACLE_ABI = [{
+  name: 'getL1Fee',
+  type: 'function',
+  stateMutability: 'view',
+  inputs:  [{ name: '_data', type: 'bytes' }],
+  outputs: [{ name: '',      type: 'uint256' }],
+}];
+// Canonical sample calldata: a typical ERC-20 `transfer(address,uint256)` —
+// 68 bytes — a representative payload for an L2 user transaction.
+const SAMPLE_ERC20_TRANSFER_CALLDATA =
+  '0xa9059cbb000000000000000000000000000000000000000000000000000000000000dead' +
+  '0000000000000000000000000000000000000000000000000de0b6b3a7640000';
+const OP_STACK_L1_FEE_CHAINS = new Set(['optimism', 'base']);
 
 // ─── Bitcoin constants ───────────────────────────────────────────────────────
 
@@ -175,19 +194,36 @@ async function getEvmGas(chainName) {
     const sparkline     = sparklineFromHistory(history);
     const priority      = derivePriorityTiers(fh.reward ?? []);
 
-    // Skip multi-block projections for chains that don't follow vanilla
+    // Skip multi-block worst-case ceilings for chains that don't follow vanilla
     // EIP-1559 update mechanics (Arbitrum, zkSync).
-    const skipProjections = chainName === 'arbitrum' || chainName === 'zksync';
-    const nextBlockTotal  = nextBlockBase + priority.med;
-    const blocks5Total    = skipProjections ? null : projectBaseFee(currentBase, 5)  + priority.med;
-    const blocks20Total   = skipProjections ? null : projectBaseFee(currentBase, 20) + priority.med;
+    const skipWorstCase  = chainName === 'arbitrum' || chainName === 'zksync';
+    const nextBlockTotal = nextBlockBase + priority.med;
+    // 1.125^n upper bound — the maximum the base fee can reach after n blocks
+    // under EIP-1559 (every block 100% full). Not a forecast.
+    const worstCase5Blocks  = skipWorstCase ? null : projectBaseFee(currentBase, 5)  + priority.med;
+    const worstCase20Blocks = skipWorstCase ? null : projectBaseFee(currentBase, 20) + priority.med;
+
+    // L1 data fee for OP Stack L2s (Optimism, Base). Best-effort: an RPC
+    // failure leaves l1FeeWei = null and the L2 portion still renders.
+    // For non-OP-Stack L2s (Linea, zkSync) the L1/pubdata component is NOT
+    // modeled — emit the 'unsupported' sentinel so the renderer can
+    // distinguish intentional omission from an RPC failure.
+    let l1FeeWei;
+    if (OP_STACK_L1_FEE_CHAINS.has(chainName)) {
+      l1FeeWei = await fetchOpStackL1Fee(client);
+    } else if (isL2) {
+      l1FeeWei = 'unsupported';
+    } else {
+      l1FeeWei = null;
+    }
 
     return baseEvmResult(chainName, adapter.nativeSymbol, isL2, {
       baseFeeGwei:  currentBase,
       priorityGwei: priority,
       nextBlock:    { totalGwei: nextBlockTotal },
-      blocks5:      blocks5Total  != null ? { totalGwei: blocks5Total }  : null,
-      blocks20:     blocks20Total != null ? { totalGwei: blocks20Total } : null,
+      worstCase5:   worstCase5Blocks  != null ? { totalGwei: worstCase5Blocks }  : null,
+      worstCase20:  worstCase20Blocks != null ? { totalGwei: worstCase20Blocks } : null,
+      l1FeeWei,
       history,
       sparkline,
       degraded: false,
@@ -210,8 +246,9 @@ async function getEvmGas(chainName) {
         baseFeeGwei:  baseGwei,
         priorityGwei: { low: priorityGwei, med: priorityGwei, high: priorityGwei },
         nextBlock:    { totalGwei: baseGwei + priorityGwei },
-        blocks5:      null,
-        blocks20:     null,
+        worstCase5:   null,
+        worstCase20:  null,
+        l1FeeWei:     isL2 && !OP_STACK_L1_FEE_CHAINS.has(chainName) ? 'unsupported' : null,
         history:      [],
         sparkline:    [],
         degraded:     true,
@@ -233,6 +270,28 @@ function baseEvmResult(chain, nativeSymbol, isL2, fields) {
     error:        null,
     ...fields,
   };
+}
+
+/**
+ * Best-effort OP Stack L1 data-fee fetch. Returns the L1 fee in wei for a
+ * sample ERC-20 transfer, or null on any failure (the L2 portion still
+ * renders so gas reporting degrades gracefully on RPC issues).
+ *
+ * @param {ReturnType<typeof makeClient>} client
+ * @returns {Promise<bigint | null>}
+ */
+async function fetchOpStackL1Fee(client) {
+  try {
+    const fee = await client.readContract({
+      address:      OP_STACK_L1_GAS_ORACLE,
+      abi:          OP_STACK_GAS_ORACLE_ABI,
+      functionName: 'getL1Fee',
+      args:         [SAMPLE_ERC20_TRANSFER_CALLDATA],
+    });
+    return typeof fee === 'bigint' ? fee : BigInt(fee);
+  } catch {
+    return null;
+  }
 }
 
 // ─── Bitcoin fetcher ─────────────────────────────────────────────────────────
@@ -454,8 +513,9 @@ function errorResult(chainName, message) {
     baseFeeGwei:  null,
     priorityGwei: null,
     nextBlock:    null,
-    blocks5:      null,
-    blocks20:     null,
+    worstCase5:   null,
+    worstCase20:  null,
+    l1FeeWei:     null,
     history:      [],
     sparkline:    [],
     bitcoin:      null,
@@ -474,8 +534,9 @@ function errorResult(chainName, message) {
  *   baseFeeGwei?: number | null,
  *   priorityGwei?: { low: number, med: number, high: number } | null,
  *   nextBlock?: { totalGwei: number } | null,
- *   blocks5?:  { totalGwei: number } | null,
- *   blocks20?: { totalGwei: number } | null,
+ *   worstCase5?:  { totalGwei: number } | null,
+ *   worstCase20?: { totalGwei: number } | null,
+ *   l1FeeWei?: bigint | null | 'unsupported',
  *   history?: number[],
  *   sparkline?: number[],
  *   bitcoin?: {

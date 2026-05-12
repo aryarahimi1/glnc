@@ -21,9 +21,11 @@
  *   2 — all network requests failed
  */
 
+import { getAddress } from 'viem';
 import { getPrices, getTokenPrices } from './prices.js';
 import { readSnapshot, writeSnapshot } from './snapshots.js';
 import { isBitcoinLegacyChecksumValid } from './chains/_base58check.js';
+import { isBitcoinBech32Valid } from './chains/_bech32.js';
 import { wrap, wrapError, wrapEvent } from './output/envelope.js';
 import { emitJSON, emitNDJSON } from './output/emit.js';
 import { SCHEMA } from './output/schemas.js';
@@ -78,8 +80,11 @@ export function detectChains(address) {
     return EVM_CHAINS;
   }
 
-  // Bitcoin bech32 (native SegWit): bc1...
-  if (/^bc1[ac-hj-np-z02-9]{6,87}$/i.test(address)) {
+  // Bitcoin bech32/bech32m (native SegWit incl. Taproot): bc1...
+  // Full BIP-173/BIP-350 checksum verification so a typo'd bc1 string is
+  // rejected here rather than silently routed to Bitcoin and returning a
+  // misleading "0 BTC" or a noisy upstream API error.
+  if (/^bc1[ac-hj-np-z02-9]{6,87}$/i.test(address) && isBitcoinBech32Valid(address)) {
     return ['bitcoin'];
   }
 
@@ -99,6 +104,14 @@ export function detectChains(address) {
   }
 
   return [];
+}
+
+// Mixed-case EVM addresses claim to be EIP-55 checksummed; viem's getAddress throws on a bad one.
+function evmChecksumIssue(addr) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) return null;
+  if (addr.toLowerCase() === addr || addr.toUpperCase() === addr) return null;
+  try { getAddress(addr); return null; }
+  catch { return `Address has an invalid EIP-55 checksum — verify you copied it correctly: ${addr}`; }
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +516,7 @@ async function fetchBalances(addressInput, chainFilter, opts) {
         try {
           entry.result.tokens = filterDust(tokens, prices, {
             showUnpriced: !!opts?.showUnpriced,
+            chain: entry.chain,
           });
         } catch {
           // Non-fatal
@@ -528,6 +542,8 @@ async function fetchBalances(addressInput, chainFilter, opts) {
  */
 export async function runBalance(addresses, chainFilter, opts = {}) {
   const json    = !!opts.json;
+  const ndjson  = !!opts.ndjson;
+  const emit    = ndjson ? emitNDJSON : emitJSON;
   const verbose = !!opts.verbose;
 
   // Normalise to array
@@ -537,12 +553,22 @@ export async function runBalance(addresses, chainFilter, opts = {}) {
   if (addrArray.length === 0) {
     const msg = 'Usage: glnc balance <address> [address2 ...] [--chain <name>]';
     if (json) {
-      emitJSON(wrapError(SCHEMA.BALANCE, msg, { code: 'usage' }));
+      emit(wrapError(SCHEMA.BALANCE, msg, { code: 'usage' }));
     } else {
       renderError(msg);
     }
     process.exitCode = 1;
     return;
+  }
+
+  for (const a of addrArray) {
+    const issue = evmChecksumIssue(a);
+    if (issue) {
+      if (json) emit(wrapError(SCHEMA.BALANCE, issue, { code: 'bad-checksum' }));
+      else renderError(issue);
+      process.exitCode = 1;
+      return;
+    }
   }
 
   // For single-address usage, validate chain detectability early (before fetch)
@@ -561,7 +587,7 @@ export async function runBalance(addresses, chainFilter, opts = {}) {
         `Could not detect chain for address: ${addrArray[0]}. ` +
         `Use --chain <name> to specify (ethereum, polygon, solana, bitcoin, arbitrum, base).`;
       if (json) {
-        emitJSON(wrapError(SCHEMA.BALANCE, msg, { code: 'unknown-chain' }));
+        emit(wrapError(SCHEMA.BALANCE, msg, { code: 'unknown-chain' }));
       } else {
         renderError(msg);
       }
@@ -576,7 +602,7 @@ export async function runBalance(addresses, chainFilter, opts = {}) {
 
   if (json) {
     // JSON mode: emit all wallets in a single envelope
-    emitJSON(wrap(SCHEMA.BALANCE, buildBalanceData(wallets, prices)));
+    emit(wrap(SCHEMA.BALANCE, buildBalanceData(wallets, prices)));
     return;
   }
 
@@ -636,6 +662,16 @@ export async function runWatch(addresses, chainFilter, opts = {}) {
   const machine = json || ndjson;
   const strict  = !!opts.strict;
   const addrArray = Array.isArray(addresses) ? addresses : [addresses];
+
+  for (const a of addrArray) {
+    const issue = evmChecksumIssue(a);
+    if (issue) {
+      if (machine) emitJSON(wrapError(SCHEMA.BALANCE, issue, { code: 'bad-checksum' }));
+      else renderError(issue);
+      process.exitCode = 1;
+      return;
+    }
+  }
 
   let stopped = false;
 
@@ -988,21 +1024,22 @@ export async function runTx(txHash, chain, opts = {}) {
   const json    = !!opts.json;
   const ndjson  = !!opts.ndjson;
   const machine = json || ndjson;
+  const emit    = ndjson ? emitNDJSON : emitJSON;
   const verbose = !!opts.verbose;
   const targetChain = chain ?? 'ethereum';
 
   const emitErr = (msg, exitCode, code = 'error') => {
     if (json) {
-      emitJSON(wrapError(SCHEMA.TX, msg, { code }));
+      emit(wrapError(SCHEMA.TX, msg, { code }));
     } else {
       renderError(msg);
     }
     process.exitCode = exitCode;
   };
 
-  // Validate hash looks plausible (EVM: 0x + 64 hex; Solana: base58 ~88 chars)
+  // Solana sigs are 87–88 base58 chars; tightened from 80–90 to avoid collision with addresses (32–44)
   const isEvmHash = /^0x[0-9a-fA-F]{64}$/.test(txHash);
-  const isSolHash = /^[1-9A-HJ-NP-Za-km-z]{80,90}$/.test(txHash);
+  const isSolHash = /^[1-9A-HJ-NP-Za-km-z]{87,88}$/.test(txHash);
   if (!isEvmHash && !isSolHash) {
     emitErr(
       `"${txHash}" does not look like a valid transaction hash. ` +
@@ -1047,7 +1084,7 @@ export async function runTx(txHash, chain, opts = {}) {
     spinner?.stop();
     if (json) {
       const { raw: _raw, ...rest } = tx ?? {};
-      emitJSON(wrap(SCHEMA.TX, { chain: targetChain, ...rest }));
+      emit(wrap(SCHEMA.TX, { chain: targetChain, ...rest }));
     } else {
       renderTransaction(tx, { verbose });
     }
@@ -1087,13 +1124,14 @@ export async function runGas(chainFilter, opts = {}) {
   const json = !!opts.json;
   const ndjson = !!opts.ndjson;
   const machine = json || ndjson;
+  const emit = ndjson ? emitNDJSON : emitJSON;
   const verbose = !!opts.verbose;
 
   const chains = resolveGasChains(chainFilter);
   if (!chains) {
     const msg = `gas supports: ${GAS_CHAINS.join(', ')}`;
     if (json) {
-      emitJSON(wrapError(SCHEMA.GAS, msg, { code: 'unknown-chain' }));
+      emit(wrapError(SCHEMA.GAS, msg, { code: 'unknown-chain' }));
     } else {
       renderError(msg);
     }
@@ -1128,7 +1166,7 @@ export async function runGas(chainFilter, opts = {}) {
   }
 
   if (json) {
-    emitJSON(wrap(SCHEMA.GAS, buildGasData(results, prices)));
+    emit(wrap(SCHEMA.GAS, buildGasData(results, prices)));
   } else {
     renderGas(results, prices, { verbose });
   }
@@ -1157,8 +1195,9 @@ function buildGasData(results, prices) {
       baseFeeGwei:  r.baseFeeGwei  ?? null,
       priorityGwei: r.priorityGwei ?? null,
       nextBlock:    r.nextBlock    ?? null,
-      blocks5:      r.blocks5      ?? null,
-      blocks20:     r.blocks20     ?? null,
+      worstCase5:   r.worstCase5   ?? null,
+      worstCase20:  r.worstCase20  ?? null,
+      l1FeeWei:     typeof r.l1FeeWei === 'bigint' ? r.l1FeeWei.toString() : (r.l1FeeWei ?? null),
       history:      r.history      ?? [],
       bitcoin:      r.bitcoin ?? null,
       solana:       r.solana  ?? null,

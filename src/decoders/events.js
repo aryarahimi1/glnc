@@ -37,6 +37,8 @@ const TOPIC_TRANSFER   = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f5
 const TOPIC_APPROVAL   = '0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925';
 const TOPIC_WETH_DEP   = '0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c';
 const TOPIC_WETH_WITH  = '0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65';
+const TOPIC_TRANSFER_SINGLE = '0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62';
+const TOPIC_TRANSFER_BATCH  = '0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb';
 // Informational only — we recognise these so we can skip double-counting.
 const TOPIC_UNI_V2_SWAP = '0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822';
 const TOPIC_UNI_V3_SWAP = '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67';
@@ -95,11 +97,11 @@ function fmtAmount(amount, decimals = 18) {
 }
 
 /**
- * Resolve a known-contract name from KNOWN_CONTRACTS (lowercase keys).
+ * Resolve a known-contract name from KNOWN_CONTRACTS (chain-scoped, lowercase keys).
  */
-function resolveName(addr) {
-  if (!addr) return null;
-  return KNOWN_CONTRACTS[addr.toLowerCase()] ?? null;
+function resolveName(addr, chain) {
+  if (!addr || !chain) return null;
+  return KNOWN_CONTRACTS[chain]?.[addr.toLowerCase()] ?? null;
 }
 
 /**
@@ -200,24 +202,23 @@ export async function decodeReceiptLogs(chain, receipt, tx, tokenMetaResolver) {
           // Skip internal hops that don't involve the user
           if (fromLow !== user && toLow !== user) continue;
 
-          // Suppress Transfer that mirrors a WETH Deposit (user wrapping ETH)
-          // The Transfer is from the WETH contract to the recipient (or zero→dst)
-          // Actually the canonical WETH deposit Transfer is from 0x000...000 to dst.
-          // Some routers transfer WETH on behalf of user. We suppress based on wad.
+          // Suppress only the canonical zero→user mint Transfer; user→anywhere is a legitimate movement.
+          const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
           if (
-            fromLow === user &&
+            fromLow === ZERO_ADDR &&
+            toLow === user &&
             contractAddr === wethAddr?.toLowerCase() &&
             depositWads.has(String(value))
           ) {
-            // This is the Transfer for the user's ETH wrap — suppress it
             depositWads.delete(String(value)); // consume once
             continue;
           }
 
           const symbol   = meta?.symbol   ?? abbreviateAddr(log.address);
-          const decimals = meta?.decimals ?? 18;
+          // BUG 25: when meta is missing we can't assume 18 decimals (e.g. USDT=6); flag for downstream.
+          const decimalsUnknown = !meta || meta.decimals == null;
           const rawAmount = String(value);
-          const amount    = fmtAmount(value, decimals);
+          const amount    = decimalsUnknown ? rawAmount : fmtAmount(value, meta.decimals);
 
           if (fromLow === user) {
             // User sent tokens out
@@ -226,9 +227,10 @@ export async function decodeReceiptLogs(chain, receipt, tx, tokenMetaResolver) {
               amount,
               symbol,
               counterparty:     to,
-              counterpartyName: resolveName(to),
+              counterpartyName: resolveName(to, chain),
               token:            log.address,
               rawAmount,
+              ...(decimalsUnknown ? { decimalsUnknown: true } : {}),
             });
           } else {
             // User received tokens
@@ -237,9 +239,10 @@ export async function decodeReceiptLogs(chain, receipt, tx, tokenMetaResolver) {
               amount,
               symbol,
               counterparty:     from,
-              counterpartyName: resolveName(from),
+              counterpartyName: resolveName(from, chain),
               token:            log.address,
               rawAmount,
+              ...(decimalsUnknown ? { decimalsUnknown: true } : {}),
             });
           }
 
@@ -270,7 +273,7 @@ export async function decodeReceiptLogs(chain, receipt, tx, tokenMetaResolver) {
               amount,
               symbol:           nftName,
               counterparty:     to,
-              counterpartyName: resolveName(to),
+              counterpartyName: resolveName(to, chain),
               token:            log.address,
               rawAmount:        tokenIdNum,
             });
@@ -280,9 +283,94 @@ export async function decodeReceiptLogs(chain, receipt, tx, tokenMetaResolver) {
               amount,
               symbol:           nftName,
               counterparty:     from,
-              counterpartyName: resolveName(from),
+              counterpartyName: resolveName(from, chain),
               token:            log.address,
               rawAmount:        tokenIdNum,
+            });
+          }
+        }
+        continue;
+      }
+
+      // ── ERC-1155 TransferSingle ─────────────────────────────────────────────
+      if (topic0 === TOPIC_TRANSFER_SINGLE) {
+        const from = addrFromTopic(log.topics[2]);
+        const to   = addrFromTopic(log.topics[3]);
+        if (!from || !to) continue;
+
+        const fromLow = from.toLowerCase();
+        const toLow   = to.toLowerCase();
+        if (fromLow !== user && toLow !== user) continue;
+
+        let id = 0n, value = 0n;
+        try {
+          [id, value] = decodeAbiParameters(
+            [{ type: 'uint256' }, { type: 'uint256' }],
+            log.data
+          );
+        } catch { continue; }
+
+        const symbol = meta?.symbol ? `${meta.symbol}-NFT` : 'NFT-1155';
+        const amount = `${value}× #${id}`;
+        const rawAmount = String(value);
+
+        if (fromLow === user) {
+          tokenMovements.push({
+            direction: 'out', amount, symbol,
+            counterparty: to, counterpartyName: resolveName(to, chain),
+            token: log.address, rawAmount,
+          });
+        } else {
+          tokenMovements.push({
+            direction: 'in', amount, symbol,
+            counterparty: from, counterpartyName: resolveName(from, chain),
+            token: log.address, rawAmount,
+          });
+        }
+        continue;
+      }
+
+      // ── ERC-1155 TransferBatch ──────────────────────────────────────────────
+      if (topic0 === TOPIC_TRANSFER_BATCH) {
+        const from = addrFromTopic(log.topics[2]);
+        const to   = addrFromTopic(log.topics[3]);
+        if (!from || !to) continue;
+
+        const fromLow = from.toLowerCase();
+        const toLow   = to.toLowerCase();
+        if (fromLow !== user && toLow !== user) continue;
+
+        let ids = [], values = [];
+        try {
+          [ids, values] = decodeAbiParameters(
+            [{ type: 'uint256[]' }, { type: 'uint256[]' }],
+            log.data
+          );
+        } catch { continue; }
+        if (ids.length !== values.length) continue;
+
+        const symbol = meta?.symbol ? `${meta.symbol}-NFT` : 'NFT-1155';
+        const direction = fromLow === user ? 'out' : 'in';
+        const counterparty = fromLow === user ? to : from;
+        const counterpartyName = resolveName(counterparty, chain);
+
+        // For huge batches, emit one summary entry to avoid log-list explosion.
+        if (ids.length > 20) {
+          const totalCount = values.reduce((acc, v) => acc + v, 0n);
+          tokenMovements.push({
+            direction, amount: `${totalCount}× (${ids.length} ids)`, symbol,
+            counterparty, counterpartyName,
+            token: log.address, rawAmount: String(totalCount),
+          });
+        } else {
+          for (let i = 0; i < ids.length; i++) {
+            tokenMovements.push({
+              direction,
+              amount: `${values[i]}× #${ids[i]}`,
+              symbol,
+              counterparty, counterpartyName,
+              token: log.address,
+              rawAmount: String(values[i]),
             });
           }
         }
@@ -298,18 +386,25 @@ export async function decodeReceiptLogs(chain, receipt, tx, tokenMetaResolver) {
 
         const value    = decodeUint256(log.data);
         const symbol   = meta?.symbol   ?? abbreviateAddr(log.address);
-        const decimals = meta?.decimals ?? 18;
+        // BUG 25: don't fall back to 18 decimals when meta is missing — flag instead.
+        const decimalsUnknown = !meta || meta.decimals == null;
 
-        const amount = value >= UNLIMITED_THRESHOLD
-          ? 'Unlimited'
-          : fmtAmount(value, decimals);
+        let amount;
+        if (value >= UNLIMITED_THRESHOLD) {
+          amount = 'Unlimited';
+        } else if (decimalsUnknown) {
+          amount = String(value);
+        } else {
+          amount = fmtAmount(value, meta.decimals);
+        }
 
         approvals.push({
           spender,
-          spenderName: resolveName(spender),
+          spenderName: resolveName(spender, chain),
           symbol,
           amount,
           token: log.address,
+          ...(decimalsUnknown && value < UNLIMITED_THRESHOLD ? { decimalsUnknown: true } : {}),
         });
         continue;
       }
@@ -334,7 +429,7 @@ export async function decodeReceiptLogs(chain, receipt, tx, tokenMetaResolver) {
           amount,
           symbol:           nativeSym,
           counterparty:     log.address, // WETH contract
-          counterpartyName: resolveName(log.address),
+          counterpartyName: resolveName(log.address, chain),
           token:            'native',
           rawAmount:        String(wad),
         });
@@ -361,7 +456,7 @@ export async function decodeReceiptLogs(chain, receipt, tx, tokenMetaResolver) {
           amount,
           symbol:           nativeSym,
           counterparty:     src,
-          counterpartyName: resolveName(src),
+          counterpartyName: resolveName(src, chain),
           token:            'native',
           rawAmount:        String(wad),
         });
@@ -404,7 +499,7 @@ function synthesizeNativeTransfer(chain, tx) {
     amount,
     symbol:           nativeSym,
     counterparty:     tx.to ?? '',
-    counterpartyName: tx.to ? resolveName(tx.to) : null,
+    counterpartyName: tx.to ? resolveName(tx.to, chain) : null,
     token:            'native',
     rawAmount:        String(value),
   }];

@@ -324,6 +324,13 @@ export function parseArgs(argv) {
     if (!webhook) {
       throw new ParseError('glnc alert requires --webhook <url> (e.g. --webhook https://hooks.example.com/...)');
     }
+    if (chain !== null && !BALANCE_SUPPORTED_CHAINS.includes(chain)) {
+      throw new ParseError(
+        `alert not supported on chain "${chain}". ` +
+        `Supported: ${BALANCE_SUPPORTED_CHAINS.join(', ')}. ` +
+        `(${chain} works for "glnc gas --chain ${chain}".)`
+      );
+    }
 
     // Alert minimum interval is 30s
     let alertInterval = interval;
@@ -376,11 +383,10 @@ export function normalizeChain(raw) {
 }
 
 /**
- * Chains that fully support balance + transaction queries. optimism, linea
- * and zksync are gas-only adapters today — `gas --chain op` works, but
- * `balance --chain op` would crash (no getBalances export). We surface that
- * mismatch as a clear ParseError instead of an unhandled adapter crash.
+ * Chains that fully support balance + transaction queries. All EVM chains
+ * with adapters exporting getBalances/getTransaction are included here.
+ * The alert whitelist auto-picks them up via this list.
  */
 export const BALANCE_SUPPORTED_CHAINS = [
-  'ethereum', 'polygon', 'arbitrum', 'base', 'solana', 'bitcoin',
+  'ethereum', 'polygon', 'arbitrum', 'base', 'optimism', 'linea', 'zksync', 'solana', 'bitcoin',
 ];

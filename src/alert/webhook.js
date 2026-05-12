@@ -17,6 +17,8 @@
 
 import { isIP } from 'node:net';
 import { lookup } from 'node:dns/promises';
+import http from 'node:http';
+import https from 'node:https';
 
 const MAX_ATTEMPTS = 3;
 const BACKOFF_MS = [500, 1500, 4500];
@@ -210,12 +212,15 @@ function isBlockedIP(ip) {
  * `--webhook http://internal.local/...` can't smuggle a private IP behind a
  * public-looking name.
  *
- * Note: there is a residual TOCTOU window between this DNS lookup and the
- * subsequent fetch (DNS rebinding). That is acceptable for a CLI alert tool;
- * eliminating it would require pinning the connection to the resolved IP.
+ * The returned `validatedIPs` is what the caller should pin the actual TCP
+ * connection to — preventing a DNS rebinding TOCTOU between this check and
+ * the subsequent POST.
  *
  * @param {string} rawUrl
- * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
+ * @returns {Promise<
+ *   | { ok: true, host: string, port: number, family: 4 | 6, validatedIPs: string[] }
+ *   | { ok: false, error: string }
+ * >}
  */
 async function validateWebhookUrl(rawUrl) {
   let parsed;
@@ -239,12 +244,15 @@ async function validateWebhookUrl(rawUrl) {
     return { ok: false, error: 'Webhook URL missing host' };
   }
 
+  const port = Number(parsed.port) || (parsed.protocol === 'https:' ? 443 : 80);
+
   // IP literal? Validate directly.
-  if (isIP(host)) {
+  const literalFamily = isIP(host);
+  if (literalFamily) {
     if (isBlockedIP(host)) {
       return { ok: false, error: `Webhook host in blocked range: ${host}` };
     }
-    return { ok: true };
+    return { ok: true, host, port, family: literalFamily, validatedIPs: [host] };
   }
 
   // Hostname: refuse bare "localhost" plus DNS-resolve and check every address.
@@ -273,7 +281,11 @@ async function validateWebhookUrl(rawUrl) {
     }
   }
 
-  return { ok: true };
+  // All resolved addresses passed the blocklist; pin the connection to one of
+  // them later so a rebinding DNS response can't redirect us to a private IP.
+  const validatedIPs = addrs.map(a => a.address);
+  const family = /** @type {4 | 6} */ (addrs[0].family);
+  return { ok: true, host, port, family, validatedIPs };
 }
 
 // Exported for tests; not part of the public CLI surface.
@@ -288,6 +300,58 @@ export const __ssrf = {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/**
+ * Issue one POST attempt with the TCP connection pinned to a pre-validated IP.
+ * Returns a non-throwing envelope; transport errors become `{ ok:false, error }`.
+ *
+ * @param {{ url: string, ip: string, family: 4 | 6, body: string, timeoutMs: number }} args
+ * @returns {Promise<{ ok: true, status: number } | { ok: false, error: string }>}
+ */
+function makeRequest({ url, ip, family, body, timeoutMs }) {
+  const parsed = new URL(url);
+  const isHttps = parsed.protocol === 'https:';
+  const lib = isHttps ? https : http;
+  const port = Number(parsed.port) || (isHttps ? 443 : 80);
+
+  return new Promise((resolve) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let settled = false;
+    const settle = (v) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
+
+    const req = lib.request({
+      method: 'POST',
+      hostname: parsed.hostname,
+      port,
+      path: (parsed.pathname || '/') + parsed.search,
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body).toString(),
+        host: parsed.host,
+      },
+      // Pin the underlying socket to the IP we already validated. Even if
+      // the system resolver now returns a private address (DNS rebinding),
+      // the connection still goes to the originally-resolved public IP.
+      lookup: (_h, _o, cb) => cb(null, ip, family),
+      // TLS uses SNI + cert verification against the original hostname.
+      servername: parsed.hostname,
+      signal: controller.signal,
+    }, (res) => {
+      // Drain the body so the socket can close cleanly; we don't need it.
+      res.on('data', () => {});
+      res.on('end', () => settle({ ok: true, status: res.statusCode ?? 0 }));
+      res.on('error', (err) => settle({ ok: false, error: err?.message ?? String(err) }));
+    });
+    req.on('error', (err) => settle({ ok: false, error: err?.message ?? String(err) }));
+    req.end(body);
+  });
+}
 
 /**
  * POST JSON payload to a webhook URL.
@@ -308,29 +372,20 @@ export async function postWebhook(url, payload, { dryRun = false } = {}) {
   }
 
   const body = JSON.stringify(payload);
+  const pinnedIp = validation.validatedIPs[0];
+  const family = validation.family;
+
   let lastError = null;
   let lastStatus = null;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
+    const res = await makeRequest({ url, ip: pinnedIp, family, body, timeoutMs: 10_000 });
 
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body,
-        signal: controller.signal,
-        redirect: 'error',
-      });
-
-      clearTimeout(timer);
+    if (res.ok) {
       lastStatus = res.status;
-
-      if (res.ok) {
+      if (res.status >= 200 && res.status < 300) {
         return { ok: true, status: res.status, attempts: attempt };
       }
-
       // 4xx: don't retry
       if (res.status >= 400 && res.status < 500) {
         return {
@@ -340,12 +395,10 @@ export async function postWebhook(url, payload, { dryRun = false } = {}) {
           attempts: attempt,
         };
       }
-
-      // 5xx: will retry if attempts remain
+      // 3xx (redirect not followed) or 5xx: retry if attempts remain
       lastError = `HTTP ${res.status}`;
-    } catch (err) {
-      clearTimeout(timer);
-      lastError = err?.message ?? String(err);
+    } else {
+      lastError = res.error;
     }
 
     // Wait before next attempt (no wait after last attempt)

@@ -14,6 +14,14 @@ import { homedir } from 'node:os';
 
 const ALERTS_PATH = join(homedir(), '.glnc', 'alerts.json');
 
+// Single-slot mutex for in-process RMW on the alerts.json file.
+let writeChain = Promise.resolve();
+function withWriteLock(fn) {
+  const next = writeChain.then(fn, fn);
+  writeChain = next.catch(() => {});
+  return next;
+}
+
 /**
  * Read raw alerts file; returns {} on any error.
  *
@@ -79,11 +87,13 @@ export async function readAlertState(alertKey) {
  * @returns {Promise<void>}
  */
 export async function writeAlertState(alertKey, { lastFiredAt, lastConditionResult }) {
-  try {
-    const raw = await readRaw();
-    raw[alertKey] = { lastFiredAt, lastConditionResult };
-    await writeRaw(raw);
-  } catch {
-    // Non-fatal
-  }
+  return withWriteLock(async () => {
+    try {
+      const raw = await readRaw();
+      raw[alertKey] = { lastFiredAt, lastConditionResult };
+      await writeRaw(raw);
+    } catch {
+      // Non-fatal
+    }
+  });
 }

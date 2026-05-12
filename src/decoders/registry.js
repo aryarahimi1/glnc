@@ -17,43 +17,61 @@
  */
 
 // ─── Known contract addresses → display names ─────────────────────────────────
-// Keys are lowercase. Used by the event decoder for counterparty name resolution.
-// The renderer may also import this map for consistent labeling.
+// addr→name, keyed by canonical chain name (matches adapter `name` exports).
+// Addresses are lowercase. Used by the event decoder for counterparty name
+// resolution; the renderer also imports this map for consistent labeling.
 
 export const KNOWN_CONTRACTS = {
-  // Uniswap V3 SwapRouter / SwapRouter02 / Universal Router are deployed at
-  // identical addresses on Ethereum and Arbitrum, so a single entry suffices.
-  // Base has its own deployment at distinct addresses, kept separately below.
+  ethereum: {
+    // Uniswap routers
+    '0x7a250d5630b4cf539739df2c5dacb4c659f2488d': 'Uniswap V2 Router',
+    '0xe592427a0aece92de3edee1f18e0157c05861564': 'Uniswap V3 SwapRouter',
+    '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45': 'Uniswap V3 SwapRouter02',
+    '0xef1c6e67703c7bd7107eed8303fbe6ec2554bf6b': 'Uniswap Universal Router (old)',
+    '0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad': 'Uniswap Universal Router',
 
-  // ── Uniswap — Ethereum / Arbitrum (shared deployment addresses) ────────────
-  '0x7a250d5630b4cf539739df2c5dacb4c659f2488d': 'Uniswap V2 Router',
-  '0xe592427a0aece92de3edee1f18e0157c05861564': 'Uniswap V3 SwapRouter',
-  '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45': 'Uniswap V3 SwapRouter02',
-  '0xef1c6e67703c7bd7107eed8303fbe6ec2554bf6b': 'Uniswap Universal Router (old)',
-  '0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad': 'Uniswap Universal Router',
+    // Wrapped native
+    '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 'WETH',
 
-  // ── Uniswap — Base ─────────────────────────────────────────────────────────
-  '0x2626664c2603336e57b271c5c0b26f421741e481': 'Uniswap V3 SwapRouter02 (Base)',
-  '0x198ef1ec325a96cc354c7266a038be8b5c558f67': 'Uniswap Universal Router (Base)',
+    // Major tokens
+    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': 'USDC',
+    '0xdac17f958d2ee523a2206206994597c13d831ec7': 'USDT',
+    '0x6b175474e89094c44da98b954eedeac495271d0f': 'DAI',
+    '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599': 'WBTC',
 
-  // ── Wrapped-native tokens ──────────────────────────────────────────────────
-  '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 'WETH',
-  '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270': 'WMATIC',
-  '0x82af49447d8a07e3bd95bd0d56f35241523fbab1': 'WETH (Arbitrum)',
-  '0x4200000000000000000000000000000000000006': 'WETH (Base)',
+    // Well-known Uniswap V2/V3 pools
+    '0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc': 'Uniswap V2: USDC/ETH',
+    '0x0d4a11d5eeaac28ec3f61d100daf4d40471f1852': 'Uniswap V2: ETH/USDT',
+    '0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640': 'Uniswap V3: USDC/ETH 0.05%',
+    '0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8': 'Uniswap V3: USDC/ETH 0.3%',
+    '0x4e68ccd3e89f51c3074ca5072bbac773960dfa36': 'Uniswap V3: ETH/USDT 0.3%',
+  },
 
-  // ── Major tokens ───────────────────────────────────────────────────────────
-  '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': 'USDC',
-  '0xdac17f958d2ee523a2206206994597c13d831ec7': 'USDT',
-  '0x6b175474e89094c44da98b954eedeac495271d0f': 'DAI',
-  '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599': 'WBTC',
+  arbitrum: {
+    // Uniswap routers (deterministic deployment shared with Ethereum)
+    '0x7a250d5630b4cf539739df2c5dacb4c659f2488d': 'Uniswap V2 Router',
+    '0xe592427a0aece92de3edee1f18e0157c05861564': 'Uniswap V3 SwapRouter',
+    '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45': 'Uniswap V3 SwapRouter02',
+    '0xef1c6e67703c7bd7107eed8303fbe6ec2554bf6b': 'Uniswap Universal Router (old)',
+    '0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad': 'Uniswap Universal Router',
 
-  // ── Uniswap V2 / V3 pools (well-known) ────────────────────────────────────
-  '0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc': 'Uniswap V2: USDC/ETH',
-  '0x0d4a11d5eeaac28ec3f61d100daf4d40471f1852': 'Uniswap V2: ETH/USDT',
-  '0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640': 'Uniswap V3: USDC/ETH 0.05%',
-  '0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8': 'Uniswap V3: USDC/ETH 0.3%',
-  '0x4e68ccd3e89f51c3074ca5072bbac773960dfa36': 'Uniswap V3: ETH/USDT 0.3%',
+    // Wrapped native
+    '0x82af49447d8a07e3bd95bd0d56f35241523fbab1': 'WETH',
+  },
+
+  polygon: {
+    // Wrapped native
+    '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270': 'WMATIC',
+  },
+
+  base: {
+    // Uniswap (separate deployment)
+    '0x2626664c2603336e57b271c5c0b26f421741e481': 'Uniswap V3 SwapRouter02',
+    '0x198ef1ec325a96cc354c7266a038be8b5c558f67': 'Uniswap Universal Router',
+
+    // Wrapped native
+    '0x4200000000000000000000000000000000000006': 'WETH',
+  },
 };
 
 export const REGISTRY = [

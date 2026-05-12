@@ -81,6 +81,21 @@ export const TOKEN_LISTS = {
     { symbol: 'WETH',  contract: '0x4200000000000000000000000000000000000006', decimals: 18 },
     { symbol: 'WELL',  contract: '0xA88594D404727625A9437C3f886C7643872296AE', decimals: 18 }, // Moonwell
   ],
+  optimism: [
+    { symbol: 'USDC',  contract: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', decimals: 6  }, // Circle-native USDC
+    { symbol: 'USDC.e',contract: '0x7F5c764cBc14f9669B88837ca1490cCa17c31607', decimals: 6  }, // Bridged USDC
+    { symbol: 'USDT',  contract: '0x94b008aA00579c1307B0EF2c499aD98a8ce58e58', decimals: 6  },
+    { symbol: 'DAI',   contract: '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1', decimals: 18 },
+    { symbol: 'WETH',  contract: '0x4200000000000000000000000000000000000006', decimals: 18 },
+    { symbol: 'WBTC',  contract: '0x68f180fcCe6836688e9084f035309E29Bf0A2095', decimals: 8  },
+    { symbol: 'OP',    contract: '0x4200000000000000000000000000000000000042', decimals: 18 },
+  ],
+  // Linea and zkSync canonical token lists intentionally omitted until each
+  // address is independently verified. With fail-closed semantics in
+  // tokens/filter.js, the missing list means *no* symbol-keyed price is
+  // applied on those chains, so a spoofed "USDC" cannot inherit a real price.
+  // Real holdings on linea/zksync are surfaced as noPrice:true (still visible
+  // via --show-unpriced). Add verified entries here to restore pricing.
 };
 
 // ─── In-memory token metadata cache ──────────────────────────────────────────

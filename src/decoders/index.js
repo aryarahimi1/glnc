@@ -28,6 +28,7 @@ import { getChainAdapter } from '../chains/index.js';
 import { fetchTokenMeta } from '../chains/_evm.js';
 import { getPrice } from '../prices.js';
 import { decodeReceiptLogs } from './events.js';
+import { formatBtc } from '../chains/bitcoin.js';
 
 // Re-use a single viem client per chain for token symbol lookups
 import { makeClient } from '../chains/_evm.js';
@@ -35,12 +36,18 @@ import { mainnet }   from 'viem/chains';
 import { polygon }   from 'viem/chains';
 import { arbitrum }  from 'viem/chains';
 import { base }      from 'viem/chains';
+import { optimism } from 'viem/chains';
+import { linea }    from 'viem/chains';
+import { zksync }   from 'viem/chains';
 
 const CHAIN_CLIENT_CONFIG = {
   ethereum: { rpc: 'https://ethereum-rpc.publicnode.com',    viemChain: mainnet  },
   polygon:  { rpc: 'https://polygon-bor-rpc.publicnode.com',  viemChain: polygon  },
   arbitrum: { rpc: 'https://arb1.arbitrum.io/rpc',      viemChain: arbitrum },
   base:     { rpc: 'https://mainnet.base.org',          viemChain: base     },
+  optimism: { rpc: 'https://optimism-rpc.publicnode.com', viemChain: optimism },
+  linea:    { rpc: 'https://linea-rpc.publicnode.com',    viemChain: linea    },
+  zksync:   { rpc: 'https://mainnet.era.zksync.io',       viemChain: zksync   },
 };
 
 const clientCache = new Map();
@@ -258,6 +265,21 @@ async function buildSummary(chain, registryEntry, params, tx) {
   return `Called ${fn} on ${protocol}`;
 }
 
+// Recipient: account in keys[1..] with the largest positive lamport delta.
+function pickSolanaTo(tx) {
+  const keys = tx.accountKeys ?? [];
+  const pre  = tx.preBalances ?? [];
+  const post = tx.postBalances ?? [];
+  if (keys.length === 0 || pre.length !== keys.length || post.length !== keys.length) return null;
+  let bestIdx = -1;
+  let bestDelta = 0n;
+  for (let i = 1; i < keys.length; i++) {
+    const delta = BigInt(post[i] ?? 0) - BigInt(pre[i] ?? 0);
+    if (delta > bestDelta) { bestDelta = delta; bestIdx = i; }
+  }
+  return bestIdx >= 0 ? (keys[bestIdx]?.pubkey ?? null) : null;
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -302,7 +324,7 @@ export async function decodeTransaction(chain, txHash) {
       hash:         txHash,
       chain,
       from:         tx.accountKeys?.[0]?.pubkey ?? null,
-      to:           tx.accountKeys?.[1]?.pubkey ?? null,
+      to:           pickSolanaTo(tx),
       value:        `${feeSol} SOL`,
       gasUsed:      '0',
       gasPriceGwei: '0',
@@ -331,7 +353,7 @@ export async function decodeTransaction(chain, txHash) {
     const btcPrice   = await getPrice('BTC');
     const feeBtcNum  = parseFloat(tx.feeBtc ?? '0');
     const feeCostUsd = btcPrice > 0 ? `$${(feeBtcNum * btcPrice).toFixed(4)}` : 'N/A';
-    const totalOut   = (tx.outputs ?? []).reduce((s, o) => s + (o.value ?? 0), 0);
+    const totalOut   = (tx.outputs ?? []).reduce((s, o) => s + (o.value ?? 0n), 0n);
 
     // Pick the most prominent output address as "to"
     const toAddr = tx.outputs?.[0]?.address ?? null;
@@ -347,7 +369,7 @@ export async function decodeTransaction(chain, txHash) {
       gasPriceGwei: '0',
       gasCostUsd:   feeCostUsd,
       status:       tx.status,
-      summary:      `Bitcoin transaction, ${(totalOut / 1e8).toFixed(8)} BTC total output, fee ${tx.feeBtc ?? '0'} BTC`,
+      summary:      `Bitcoin transaction, ${formatBtc(totalOut < 0n ? 0n : totalOut)} BTC total output, fee ${tx.feeBtc ?? '0'} BTC`,
       raw:          { tx },
       tokenMovements: [],
       approvals:      [],

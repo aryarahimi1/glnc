@@ -15,7 +15,7 @@ import { writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 
 import { wrap, wrapError } from '../output/envelope.js';
-import { emitJSON } from '../output/emit.js';
+import { emitJSON, emitNDJSON } from '../output/emit.js';
 import { SCHEMA } from '../output/schemas.js';
 import { renderError, c, theme } from '../cli/render.js';
 
@@ -41,6 +41,9 @@ function parseDate(s, endOfDay = false) {
     ? Date.UTC(y, mo, d, 23, 59, 59)
     : Date.UTC(y, mo, d, 0, 0, 0);
   if (isNaN(ms)) return null;
+  // Reject rollovers like 2025-02-31 → March 3 by round-tripping the components.
+  const back = new Date(ms);
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo || back.getUTCDate() !== d) return null;
   return Math.floor(ms / 1000);
 }
 
@@ -85,10 +88,12 @@ function defaultCsvName(address, chain) {
  */
 export async function runHistory(addressInput, opts = {}) {
   const json = !!opts.json;
+  const ndjson = !!opts.ndjson;
+  const emit = ndjson ? emitNDJSON : emitJSON;
   const noPrices = !!opts.noPrices;
 
   const emitErr = (msg, exitCode, code = 'error') => {
-    if (json) emitJSON(wrapError(SCHEMA.HISTORY, msg, { code }));
+    if (json) emit(wrapError(SCHEMA.HISTORY, msg, { code }));
     else renderError(msg);
     process.exitCode = exitCode;
   };
@@ -263,15 +268,19 @@ export async function runHistory(addressInput, opts = {}) {
     }
   }
 
+  // Some rows were dropped at the 10k cap — surface this distinctly from generic warnings.
+  const truncated = !!(normalRes.truncated || internalRes.truncated || tokenRes.truncated);
+
   // ── Emit ──────────────────────────────────────────────────────────────────
   if (json) {
-    emitJSON(wrap(SCHEMA.HISTORY, {
+    emit(wrap(SCHEMA.HISTORY, {
       chain,
       address,
       from: new Date(fromTs * 1000).toISOString(),
       to: new Date(toTs * 1000).toISOString(),
       blockRange: { start: range.startBlock, end: range.endBlock },
       rowCount: rows.length,
+      truncated,
       rows,
       warnings,
     }));
@@ -301,6 +310,10 @@ export async function runHistory(addressInput, opts = {}) {
     process.stderr.write(
       `  ${c.green('✓')} ${c.bold(rows.length.toString())} rows on stdout\n`
     );
+  }
+
+  if (truncated) {
+    process.stderr.write(c.dim('  some rows were dropped (>10000 per action); narrow --from/--to to retrieve all rows\n'));
   }
 
   if (warnings.length > 0) {
