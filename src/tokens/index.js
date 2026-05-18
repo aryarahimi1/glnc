@@ -18,6 +18,9 @@ const CHAIN_IDS = {
   polygon:  137,
   arbitrum: 42161,
   base:     8453,
+  optimism: 10,
+  linea:    59144,
+  zksync:   324,
 };
 
 // In-memory singleton per chain — populated after first successful fetch.

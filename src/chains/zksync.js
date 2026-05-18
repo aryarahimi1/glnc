@@ -6,9 +6,12 @@
  * Balance via viem's standard JSON-RPC works fine. Transactions, however, use
  * a non-standard format (custom fields like `paymaster`, `customData`) — if
  * viem's getTransaction throws on these, we surface the error rather than
- * adding zksync-specific decoding here. Token list is not yet curated for
- * zkSync — getTokenList returns an empty array, so only native ETH is
- * reported.
+ * adding zksync-specific decoding here. ERC-20 pricing is intentionally
+ * fail-closed: canonical zkSync token addresses have not yet been
+ * independently verified, so no symbol-keyed price is applied (spoofed
+ * "USDC" cannot inherit a real price). Holdings still surface as noPrice —
+ * pass --show-unpriced to see them. Discovered tokens from the Uniswap
+ * default list are still loaded via tokens/index.js.
  *
  * Note: zkSync Era's fee model differs from vanilla EIP-1559. eth_feeHistory
  * may return limited or non-standard data; the gas fetcher's fallback path

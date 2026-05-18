@@ -36,7 +36,7 @@ glnc gas                                  ← live gas across 9 chains
 | **Interactive REPL** | `glnc interactive` — paste addresses, jump between commands |
 | **Hardened webhook** | SSRF-validated URLs, scheme allowlist, RFC1918/IMDS/loopback blocked |
 | **JSON + NDJSON** | Stable, versioned envelopes on stdout — `--json` for one-shot, NDJSON for `--watch` |
-| **6 chains for balance/tx · 9 for gas** | See the [Chain support matrix](#chain-support-matrix) |
+| **9 chains for balance · 8 for tx · 9 for gas** | See the [Chain support matrix](#chain-support-matrix) |
 
 ---
 
@@ -123,9 +123,15 @@ Per-command help is the canonical reference — `glnc balance --help`,
 
 ## Chain support matrix
 
-`balance` and `tx` work on the **6 chains** that have full adapters. `gas` adds
-`optimism`, `linea`, and `zksync` — these have gas-only adapters. Trying
-`balance --chain optimism` errors with a helpful message instead of crashing.
+`balance` works on **9 chains** — 7 EVM L1/L2s plus Solana and Bitcoin. `tx`
+covers the same set except Bitcoin (8 chains). `gas` covers the same EVM set
+plus BTC and SOL fee markets (9 chains).
+
+> **Note:** native balances on Linea and zkSync are priced normally, but
+> ERC-20 *token* prices are intentionally fail-closed (`noPrice`) on those
+> chains until canonical token addresses are independently verified — this
+> prevents spoofed tokens from inheriting real prices. Pass `--show-unpriced`
+> to see all balances.
 
 | Chain | `balance` | `tx` | `gas` | Aliases |
 |---|---|---|---|---|
@@ -133,11 +139,11 @@ Per-command help is the canonical reference — `glnc balance --help`,
 | Polygon | ✓ | ✓ | ✓ | `poly`, `matic`, `polygon` |
 | Arbitrum | ✓ | ✓ | ✓ | `arb`, `arbitrum` |
 | Base | ✓ | ✓ | ✓ | `base` |
+| Optimism | ✓ | ✓ | ✓ | `op`, `optimism` |
+| zkSync | ✓ | ✓ | ✓ | `zk`, `era`, `zksync` |
+| Linea | ✓ | ✓ | ✓ | `linea` |
 | Solana | ✓ | ✓ | ✓ | `sol`, `solana` |
 | Bitcoin | ✓ | — | ✓ | `btc`, `bitcoin` |
-| Optimism | — | — | ✓ | `op`, `optimism` |
-| zkSync | — | — | ✓ | `zk`, `era`, `zksync` |
-| Linea | — | — | ✓ | `linea` |
 
 ---
 
@@ -147,7 +153,7 @@ glnc detects the chain from the address format — no `--chain` needed:
 
 | Pattern | Detected as |
 |---|---|
-| `0x` + 40 hex | All EVM chains (ethereum, polygon, arbitrum, base) |
+| `0x` + 40 hex | All EVM chains (ethereum, polygon, arbitrum, base, optimism, linea, zksync) |
 | `vitalik.eth` or any `.eth` / `.xyz` | ENS → resolved to EVM address |
 | `bc1...` (bech32 SegWit) | Bitcoin |
 | `1...` or `3...` (legacy) | Bitcoin |
@@ -602,9 +608,9 @@ glnc/
       base.js
       solana.js             # multi-RPC fallback (publicnode → mainnet-beta → blastapi)
       bitcoin.js
-      optimism.js           # gas-only adapter
-      linea.js              # gas-only adapter
-      zksync.js             # gas-only adapter
+      optimism.js           # full adapter (balance + tx + gas)
+      linea.js
+      zksync.js
       index.js              # address-type detection + adapter loader
     cli/
       args.js               # argument parser + chain alias normalization (zero deps)

@@ -1582,7 +1582,7 @@ ${c.bold('glnc balance')} <address>... [flags]
   the chain from the address format; pass --chain to scope to one chain.
 
 ${c.bold('FLAGS')}
-  --chain <name>      single chain (eth/poly/arb/base/sol/btc)
+  --chain <name>      single chain (eth/poly/arb/base/op/zk/linea/sol/btc)
   --watch / -w        re-poll on an interval; show deltas in place
   --interval <N>      seconds between polls (default 15)
   --positions / -p    include DeFi positions (Aave V3, Uniswap V3 LP)
@@ -1608,7 +1608,8 @@ ${c.bold('glnc tx')} <hash> [flags]
   fee, status, and accounts.
 
 ${c.bold('FLAGS')}
-  --chain <name>      override chain (default: ethereum, or solana for base58)
+  --chain <name>      override chain (eth/poly/arb/base/op/zk/linea/sol;
+                      default: ethereum, or solana for base58)
   --json              emit JSON envelope on stdout
   --verbose / -v      show full addresses
   --no-color          disable ANSI colors

@@ -50,6 +50,9 @@ const WRAPPED_NATIVE = {
   polygon:  '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270', // WMATIC
   arbitrum: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1', // WETH on Arbitrum
   base:     '0x4200000000000000000000000000000000000006', // WETH on Base
+  optimism: '0x4200000000000000000000000000000000000006', // WETH on Optimism (OP-stack canonical)
+  linea:    '0xe5d7c2a44ffddf6b295a15c148167daaaf5cf34f', // WETH on Linea
+  zksync:   '0x5aea5775959fbc2557cc8789bc1bf90a239d9a91', // WETH on zkSync Era
 };
 
 // Native symbol by chain
@@ -58,6 +61,9 @@ const NATIVE_SYMBOL = {
   polygon:  'POL',
   arbitrum: 'ETH',
   base:     'ETH',
+  optimism: 'ETH',
+  linea:    'ETH',
+  zksync:   'ETH',
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -114,7 +120,7 @@ const UNLIMITED_THRESHOLD = 2n ** 255n;
 /**
  * Decode all event logs from a transaction receipt into structured arrays.
  *
- * @param {string}   chain             - 'ethereum' | 'polygon' | 'arbitrum' | 'base'
+ * @param {string}   chain             - 'ethereum' | 'polygon' | 'arbitrum' | 'base' | 'optimism' | 'linea' | 'zksync'
  * @param {object}   receipt           - viem receipt object (has .logs array)
  * @param {object}   tx                - raw tx object (has .from, .to, .value, .input)
  * @param {Function} tokenMetaResolver - async (chain, address) => { symbol, decimals } | null

@@ -157,6 +157,9 @@ export const theme = {
     polygon:  bg256(99),
     arbitrum: bg256(27),
     base:     bg256(26),
+    optimism: bg256(160),
+    zksync:   bg256(105),
+    linea:    bg256(22),
     solana:   bg256(35),
     bitcoin:  bg256(208),
   },
@@ -191,6 +194,9 @@ const CHAIN_GLYPH = {
   polygon:  '⬡',
   arbitrum: '◆',
   base:     '▲',
+  optimism: '◉',
+  zksync:   '⟁',
+  linea:    '⬣',
   solana:   '◎',
   bitcoin:  '₿',
 };
@@ -209,7 +215,11 @@ export function chainBadge(name) {
 
   if (!COLOR_ENABLED) return label.trim();
 
-  const bgCode  = { ethereum: 240, polygon: 99, arbitrum: 27, base: 26, solana: 35, bitcoin: 208 }[key] ?? 240;
+  const bgCode  = {
+    ethereum: 240, polygon: 99, arbitrum: 27, base: 26,
+    optimism: 160, zksync: 105, linea: 22,
+    solana: 35, bitcoin: 208,
+  }[key] ?? 240;
   // bold + white fg + bg256 + reset
   return `\x1b[48;5;${bgCode}m\x1b[1m\x1b[97m${label}\x1b[0m`;
 }

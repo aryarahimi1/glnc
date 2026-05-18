@@ -46,6 +46,9 @@ const CHAIN_TO_PLATFORM = {
   polygon:  'polygon-pos',
   arbitrum: 'arbitrum-one',
   base:     'base',
+  optimism: 'optimistic-ethereum',
+  linea:    'linea',
+  zksync:   'zksync',
 };
 
 const BATCH_SIZE = 100; // CoinGecko URL length safety limit

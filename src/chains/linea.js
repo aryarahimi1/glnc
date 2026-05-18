@@ -4,8 +4,12 @@
  * Linea Mainnet chain adapter (Consensys ZK-EVM L2).
  *
  * Balance + tx via viem's standard JSON-RPC; Linea is EVM-equivalent and
- * shares Ethereum's tx shape. Token list is not yet curated for Linea —
- * getTokenList returns an empty array, so only native ETH is reported.
+ * shares Ethereum's tx shape. ERC-20 pricing is intentionally fail-closed
+ * here: canonical Linea token addresses have not yet been independently
+ * verified, so no symbol-keyed price is applied (spoofed "USDC" cannot
+ * inherit a real price). Holdings still surface as noPrice — pass
+ * --show-unpriced to see them. Discovered tokens from the Uniswap default
+ * list are still loaded via tokens/index.js.
  *
  * Exports:
  *   name          — 'linea'

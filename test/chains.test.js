@@ -8,6 +8,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectAddressType, getChainAdapter, EVM_CHAINS } from '../src/chains/index.js';
+import { detectChains } from '../src/index.js';
 
 describe('detectAddressType', () => {
   it('detects EVM address (checksummed)', () => {
@@ -58,6 +59,37 @@ describe('detectAddressType', () => {
 
   it('returns unknown for garbage input', () => {
     assert.equal(detectAddressType('not-an-address'), 'unknown');
+  });
+});
+
+describe('detectChains', () => {
+  it('EVM address returns the 7 expected chains', () => {
+    const chains = detectChains('0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045');
+    assert.deepEqual(
+      [...chains].sort(),
+      ['arbitrum', 'base', 'ethereum', 'linea', 'optimism', 'polygon', 'zksync'],
+    );
+  });
+
+  it('returns a fresh array (caller mutation does not affect EVM_CHAINS)', () => {
+    const chains = detectChains('0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045');
+    chains.push('xxx');
+    assert.equal(EVM_CHAINS.includes('xxx'), false);
+  });
+
+  it('Bitcoin bech32 address returns only bitcoin', () => {
+    const chains = detectChains('bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq');
+    assert.deepEqual(chains, ['bitcoin']);
+  });
+
+  it('Solana address returns only solana', () => {
+    const chains = detectChains('9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM');
+    assert.deepEqual(chains, ['solana']);
+  });
+
+  it('unknown address returns empty array', () => {
+    const chains = detectChains('not-a-real-address');
+    assert.deepEqual(chains, []);
   });
 });
 

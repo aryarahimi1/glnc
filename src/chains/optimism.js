@@ -4,8 +4,9 @@
  * Optimism Mainnet chain adapter (OP Stack L2).
  *
  * Balance + tx via viem's standard JSON-RPC; OP-Stack chains share Ethereum's
- * tx shape. Token list is not yet curated for Optimism — getTokenList returns
- * an empty array until a curated list lands, so only native ETH is reported.
+ * tx shape. Curated token list for Optimism lives in _evm.js (USDC, USDC.e,
+ * USDT, DAI, WETH, WBTC, OP); discovered tokens from the Uniswap default list
+ * are merged on top via tokens/index.js.
  *
  * Exports:
  *   name          — 'optimism'

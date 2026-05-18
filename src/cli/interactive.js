@@ -22,6 +22,9 @@ const BALANCE_CHAINS = [
   { value: 'polygon',  icon: '⬡', label: 'Polygon',      description: 'EVM' },
   { value: 'arbitrum', icon: '◆', label: 'Arbitrum',     description: 'EVM L2' },
   { value: 'base',     icon: '▲', label: 'Base',         description: 'EVM L2' },
+  { value: 'optimism', icon: '◉', label: 'Optimism',     description: 'EVM L2 (OP Stack)' },
+  { value: 'zksync',   icon: '⟁', label: 'zkSync Era',   description: 'EVM L2 (ZK rollup)' },
+  { value: 'linea',    icon: '⬣', label: 'Linea',        description: 'EVM L2 (Consensys)' },
   { value: 'solana',   icon: '◎', label: 'Solana',       description: 'Non-EVM' },
   { value: 'bitcoin',  icon: '₿', label: 'Bitcoin',      description: 'Non-EVM' },
 ];
@@ -31,6 +34,9 @@ const TX_CHAINS = [
   { value: 'polygon',  icon: '⬡', label: 'Polygon',   description: 'EVM' },
   { value: 'arbitrum', icon: '◆', label: 'Arbitrum',  description: 'EVM L2' },
   { value: 'base',     icon: '▲', label: 'Base',      description: 'EVM L2' },
+  { value: 'optimism', icon: '◉', label: 'Optimism',  description: 'EVM L2 (OP Stack)' },
+  { value: 'zksync',   icon: '⟁', label: 'zkSync Era', description: 'EVM L2 (ZK rollup)' },
+  { value: 'linea',    icon: '⬣', label: 'Linea',     description: 'EVM L2 (Consensys)' },
   { value: 'solana',   icon: '◎', label: 'Solana',    description: 'Non-EVM' },
 ];
 
@@ -55,6 +61,9 @@ const ALERT_CHAINS = [
   { value: 'polygon',  icon: '⬡', label: 'Polygon',   description: 'EVM' },
   { value: 'arbitrum', icon: '◆', label: 'Arbitrum',  description: 'EVM L2' },
   { value: 'base',     icon: '▲', label: 'Base',      description: 'EVM L2' },
+  { value: 'optimism', icon: '◉', label: 'Optimism',  description: 'EVM L2 (OP Stack)' },
+  { value: 'zksync',   icon: '⟁', label: 'zkSync Era', description: 'EVM L2 (ZK rollup)' },
+  { value: 'linea',    icon: '⬣', label: 'Linea',     description: 'EVM L2 (Consensys)' },
   { value: 'solana',   icon: '◎', label: 'Solana',    description: 'Non-EVM' },
   { value: 'bitcoin',  icon: '₿', label: 'Bitcoin',   description: 'Non-EVM' },
 ];

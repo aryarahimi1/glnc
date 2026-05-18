@@ -60,12 +60,11 @@ import {
   c,
 } from './cli/render.js';
 import { getAllGas, GAS_CHAINS, EVM_GAS_CHAINS } from './gas.js';
+import { EVM_CHAINS } from './chains/index.js';
 
 // ---------------------------------------------------------------------------
 // Address type detection
 // ---------------------------------------------------------------------------
-
-const EVM_CHAINS = ['ethereum', 'polygon', 'arbitrum', 'base'];
 
 /**
  * Detect which chains are relevant for a given address string.
@@ -77,7 +76,7 @@ const EVM_CHAINS = ['ethereum', 'polygon', 'arbitrum', 'base'];
 export function detectChains(address) {
   // EVM: 0x followed by exactly 40 hex characters
   if (/^0x[0-9a-fA-F]{40}$/.test(address)) {
-    return EVM_CHAINS;
+    return [...EVM_CHAINS];
   }
 
   // Bitcoin bech32/bech32m (native SegWit incl. Taproot): bc1...
@@ -476,11 +475,12 @@ async function fetchBalances(addressInput, chainFilter, opts) {
 
   // Fill in prices for EVM tokens that have a contract address but no symbol-
   // based price (e.g. long-tail tokens absent from SYMBOL_TO_ID).
+  const evmSet = new Set(EVM_CHAINS);
   const contractsByChain = new Map();
   for (const wallet of wallets) {
     for (const { chain, result } of wallet.results) {
       if (!result || result.error) continue;
-      if (!['ethereum', 'polygon', 'arbitrum', 'base'].includes(chain)) continue;
+      if (!evmSet.has(chain)) continue;
       for (const token of result.tokens ?? []) {
         if (!token.contract || !token.symbol) continue;
         if (prices[token.symbol.toUpperCase()] !== undefined) continue;
@@ -583,9 +583,10 @@ export async function runBalance(addresses, chainFilter, opts = {}) {
     }
     const chains = detectChains(checkAddr);
     if (chains.length === 0) {
+      const supported = [...EVM_CHAINS, 'solana', 'bitcoin'].join(', ');
       const msg =
         `Could not detect chain for address: ${addrArray[0]}. ` +
-        `Use --chain <name> to specify (ethereum, polygon, solana, bitcoin, arbitrum, base).`;
+        `Use --chain <name> to specify (${supported}).`;
       if (json) {
         emit(wrapError(SCHEMA.BALANCE, msg, { code: 'unknown-chain' }));
       } else {
