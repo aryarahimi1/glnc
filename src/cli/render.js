@@ -442,6 +442,7 @@ export function renderTable(headers, rows, opts = {}) {
  *   deltas?: Map<string, { prev: string, curr: string }>,
  *   positions?: any,
  *   nfts?: any,
+ *   pricesMeta?: { ok?: boolean, rateLimited?: boolean }|null,
  * }} [opts]
  */
 export function renderBalances(results, prices, opts = {}) {
@@ -556,10 +557,10 @@ export function renderBalances(results, prices, opts = {}) {
     if (rows.length === 0) {
       console.log(c.dim('  (no assets)'));
       // Still render positions / NFT sections if available even when no assets
-      if (opts.positions?.[chain]) {
+      if (opts.positions && !opts.positions.__error && opts.positions[chain]) {
         renderPositions(opts.positions[chain], opts);
       }
-      if (opts.nfts?.[chain]) {
+      if (opts.nfts && !opts.nfts.__error && opts.nfts[chain]) {
         renderNfts(opts.nfts[chain], opts);
       }
       continue;
@@ -576,24 +577,51 @@ export function renderBalances(results, prices, opts = {}) {
     );
 
     // DeFi positions section (Feature 5)
-    if (opts.positions?.[chain]) {
+    if (opts.positions && !opts.positions.__error && opts.positions[chain]) {
       renderPositions(opts.positions[chain], opts);
     }
 
     // NFT holdings section
-    if (opts.nfts?.[chain]) {
+    if (opts.nfts && !opts.nfts.__error && opts.nfts[chain]) {
       renderNfts(opts.nfts[chain], opts);
     }
   }
 
+  // Surface whole-call failures for DeFi / NFTs (once, after all chains)
+  if (opts.positions?.__error) {
+    console.log('');
+    console.log('  ' + c.yellow('⚠ DeFi positions unavailable: ') + opts.positions.__error);
+  }
+  if (opts.nfts?.__error) {
+    console.log('');
+    console.log('  ' + c.yellow('⚠ NFTs unavailable: ') + opts.nfts.__error);
+  }
+
   // Grand total
   console.log('');
-  const totalStr = grandTotalKnown
-    ? c.bold(c.green(formatUsd(grandTotalUsd)))
-    : c.bold(c.yellow(formatUsd(grandTotalUsd) + '+'));
+  let totalStr;
+  if (grandTotalKnown) {
+    totalStr = c.bold(c.green(formatUsd(grandTotalUsd)));
+  } else if (grandTotalUsd === 0) {
+    // No prices resolved at all — "$0.00+" misleads, show em-dash
+    totalStr = c.dim('—');
+  } else {
+    totalStr = c.bold(c.yellow(formatUsd(grandTotalUsd) + '+'));
+  }
   console.log(c.bold('  Grand Total: ') + totalStr);
   if (!grandTotalKnown) {
-    console.log(c.dim('  (+ indicates some asset prices are unavailable)'));
+    if (grandTotalUsd === 0) {
+      console.log(c.dim('  (price data unavailable)'));
+    } else {
+      console.log(c.dim('  (+ indicates some asset prices are unavailable)'));
+    }
+  }
+
+  // Surface price-source failures so users know why USD columns are em-dashes
+  const pm = opts.pricesMeta;
+  if (pm && (pm.ok === false || pm.rateLimited === true)) {
+    console.log('  ' + c.yellow('⚠ Prices unavailable from CoinGecko (rate-limited or upstream error)'));
+    console.log('    ' + c.dim('USD values shown as "—". Try again in 60s, or run with --json to inspect meta.sources.prices.'));
   }
   console.log('');
 }
@@ -822,9 +850,14 @@ export function renderPortfolioTotal(wallets, prices) {
   const DIVIDER_WIDTH = 55;
   const divider = c.dim('━'.repeat(DIVIDER_WIDTH));
   const label = c.bold(`PORTFOLIO TOTAL (${walletCount} wallet${walletCount !== 1 ? 's' : ''})`);
-  const totalStr = totalKnown
-    ? c.bold(c.green(formatUsd(total)))
-    : c.bold(c.yellow(formatUsd(total) + '+'));
+  let totalStr;
+  if (totalKnown) {
+    totalStr = c.bold(c.green(formatUsd(total)));
+  } else if (total === 0) {
+    totalStr = c.dim('—');
+  } else {
+    totalStr = c.bold(c.yellow(formatUsd(total) + '+'));
+  }
 
   console.log('');
   console.log(`  ${divider}`);

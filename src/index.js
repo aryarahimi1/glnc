@@ -386,9 +386,11 @@ async function queryWallet(resolvedAddress, chainFilter, opts, sem) {
         ['ethereum', 'polygon', 'arbitrum', 'base'].includes(c)
       );
       if (evmChains.length > 0) {
+        // __error: top-level error marker distinguishes a full-call failure
+        // from per-chain keys; consumed by the render path, scrubbed from JSON.
         positionsResult = await posMod
           .getPositions(resolvedAddress, evmChains)
-          .catch(() => null);
+          .catch(err => ({ __error: err?.message ?? String(err) }));
       }
     }
   }
@@ -402,11 +404,15 @@ async function queryWallet(resolvedAddress, chainFilter, opts, sem) {
         ['ethereum', 'polygon', 'arbitrum', 'base', 'optimism'].includes(c)
       );
       if (evmNftChains.length > 0) {
-        nftsResult = await nftMod
-          .getNftHoldings(resolvedAddress, evmNftChains, {
-            apiKey: process.env.RESERVOIR_API_KEY ?? null,
-          })
-          .catch(() => null);
+        if (!process.env.RESERVOIR_API_KEY) {
+          nftsResult = { __error: 'RESERVOIR_API_KEY environment variable not set' };
+        } else {
+          nftsResult = await nftMod
+            .getNftHoldings(resolvedAddress, evmNftChains, {
+              apiKey: process.env.RESERVOIR_API_KEY,
+            })
+            .catch(err => ({ __error: err?.message ?? String(err) }));
+        }
       }
     }
   }
@@ -674,6 +680,7 @@ export async function runBalance(addresses, chainFilter, opts = {}) {
   }
 
   // Pretty rendering
+  const pricesMeta = meta?.sources?.prices ?? null;
   if (multiWallet) {
     for (const wallet of wallets) {
       renderWalletHeader(wallet.displayName, wallet.resolvedAddress, { verbose });
@@ -681,6 +688,7 @@ export async function runBalance(addresses, chainFilter, opts = {}) {
         verbose,
         positions: wallet.positions,
         nfts: wallet.nfts,
+        pricesMeta,
       });
     }
     renderPortfolioTotal(wallets, prices);
@@ -695,6 +703,7 @@ export async function runBalance(addresses, chainFilter, opts = {}) {
       verbose,
       positions: wallet.positions,
       nfts: wallet.nfts,
+      pricesMeta,
     });
   }
 
@@ -776,6 +785,13 @@ export async function runWatch(addresses, chainFilter, opts = {}) {
   let lastRefreshMs = null;
   let prevPollData = null;
   let pollIndex = 0;
+
+  // Visible signal that watch mode is starting — printed to the user's normal
+  // scrollback BEFORE alt-screen takes over, so even if the first render
+  // crashes they still see proof that watch mode engaged.
+  if (!machine) {
+    console.log(c.dim(`Entering watch mode (Ctrl+C to exit, refreshing every ${intervalSecs}s)...`));
+  }
 
   try {
     while (!stopped) {
@@ -872,28 +888,39 @@ export async function runWatch(addresses, chainFilter, opts = {}) {
         }));
         prevPollData = data;
       } else {
-        const multiWallet = addrArray.length > 1;
-        if (multiWallet) {
-          for (const wallet of wallets) {
-            renderWalletHeader(wallet.displayName, wallet.resolvedAddress, { verbose });
-            renderBalances(wallet.results, prices, {
-              verbose,
-              positions: wallet.positions,
-              nfts: wallet.nfts,
-              deltas: walletDeltas.get(wallet.resolvedAddress),
-            });
+        try {
+          const multiWallet = addrArray.length > 1;
+          const pricesMeta = pollMeta?.sources?.prices ?? null;
+          if (multiWallet) {
+            for (const wallet of wallets) {
+              renderWalletHeader(wallet.displayName, wallet.resolvedAddress, { verbose });
+              renderBalances(wallet.results, prices, {
+                verbose,
+                positions: wallet.positions,
+                nfts: wallet.nfts,
+                deltas: walletDeltas.get(wallet.resolvedAddress),
+                pricesMeta,
+              });
+            }
+            renderPortfolioTotal(wallets, prices);
+          } else {
+            const wallet = wallets[0];
+            if (wallet) {
+              renderBalances(wallet.results, prices, {
+                verbose,
+                positions: wallet.positions,
+                nfts: wallet.nfts,
+                deltas: walletDeltas.get(wallet.resolvedAddress),
+                pricesMeta,
+              });
+            }
           }
-          renderPortfolioTotal(wallets, prices);
-        } else {
-          const wallet = wallets[0];
-          if (wallet) {
-            renderBalances(wallet.results, prices, {
-              verbose,
-              positions: wallet.positions,
-              nfts: wallet.nfts,
-              deltas: walletDeltas.get(wallet.resolvedAddress),
-            });
-          }
+        } catch (renderErr) {
+          // Surface the crash inside alt-screen so the user can see it; do
+          // NOT exit alt-screen — that would hide the error.
+          console.log('');
+          console.log(c.red('  Render error: ') + (renderErr?.message ?? String(renderErr)));
+          console.log(c.dim('  (will retry on next tick — press Ctrl+C to exit)'));
         }
       }
 
@@ -945,12 +972,15 @@ function buildBalanceData(wallets, prices) {
     } else {
       totalUsd += chainsOut.grandTotalUsd;
     }
+    // Scrub __error sentinel — JSON consumers see null (matching pre-1.0.9
+    // silent-null behavior) rather than an internal render-only shape.
+    const nftsOut = wallet.nfts && wallet.nfts.__error ? null : (wallet.nfts ?? null);
     return {
       address: wallet.resolvedAddress,
       displayName: wallet.displayName,
       chains: chainsOut.chains,
       grandTotalUsd: chainsOut.grandTotalUsd,
-      nfts: wallet.nfts ?? null,
+      nfts: nftsOut,
     };
   });
   return { wallets: walletsOut, totalUsd: totalKnown ? totalUsd : null };
