@@ -247,7 +247,7 @@ Calldata decoding covers ERC-20, WETH, Uniswap V2/V3/Universal Router, plus nest
 - **GovernorBravo** / **OZ Governor** — `propose`, `queue`, `execute`
 - **OZ Timelock** — `schedule`, `scheduleBatch`, `execute`, `executeBatch`
 - **Safe** — `execTransaction` (inner `data` only; signatures are not treated as calldata)
-- **Gnosis MultiSend** — packed `multiSend` byte-walker with depth-2 recursion
+- **Gnosis MultiSend** — packed `multiSend` byte-walker with depth-3 recursion (Governor → Timelock → MultiSend → leaf decodes fully)
 
 ```
 $ glnc tx 0x02d15281c5514a447192cc8d6140216050f8d3bf92efccd420b635274764fb94

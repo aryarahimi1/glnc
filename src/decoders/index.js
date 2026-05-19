@@ -53,7 +53,7 @@ const CHAIN_CLIENT_CONFIG = {
 
 const clientCache = new Map();
 
-const MAX_NESTED_DEPTH  = 2;
+const MAX_NESTED_DEPTH  = 3;
 const MAX_NESTED_BYTES  = 65_536;
 const MULTISEND_SELECTOR = '0x8d80ff0a';
 

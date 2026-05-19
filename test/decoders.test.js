@@ -206,7 +206,7 @@ describe('summarizeCalldata', () => {
     assert.match(summary, /Transferred/i);
   });
 
-  it('drops depth-3 leaf with explicit not-expanded note', async () => {
+  it('decodes Governor → Safe → MultiSend → ERC20 leaf at depth 3', async () => {
     const transfer = encodeTransfer();
     const packed = packMultiSendRecord({ to: USDC, data: transfer });
     const multiSend = encodeMultiSend(packed);
@@ -217,7 +217,33 @@ describe('summarizeCalldata', () => {
     const safeChild = nested.params.children[0];
     const msChild = safeChild.params.children[0];
     assert.equal(msChild.registryEntry.protocol, 'Gnosis MultiSend');
-    assert.ok(msChild.params.children.some(c => c.dropped === true));
+
+    const leaf = msChild.params.children[0];
+    assert.equal(leaf.registryEntry.protocol, 'ERC20');
+    assert.equal(leaf.registryEntry.name, 'transfer');
+
+    const summary = await summarizeCalldata('ethereum', propose);
+    assert.match(summary, /Proposed governance action/i);
+    assert.match(summary, /Safe exec/i);
+    assert.match(summary, /MultiSend/i);
+    assert.match(summary, /Transferred|transfer/i);
+    assert.doesNotMatch(summary, /deeper call not expanded/i);
+  });
+
+  it('drops depth-4 leaf with explicit not-expanded note', async () => {
+    const transfer = encodeTransfer();
+    const innerSafe = encodeSafeExec({ to: USDC, data: transfer });
+    const packed = packMultiSendRecord({ to: TARGET, data: innerSafe });
+    const multiSend = encodeMultiSend(packed);
+    const outerSafe = encodeSafeExec({ to: TARGET, data: multiSend });
+    const propose = encodeGovernorPropose([outerSafe]);
+
+    const nested = decodeNestedCalldata(propose, 0, 0);
+    const msChild = nested.params.children[0].params.children[0];
+    assert.equal(msChild.registryEntry.protocol, 'Gnosis MultiSend');
+    const innerSafeNode = msChild.params.children[0];
+    assert.equal(innerSafeNode.registryEntry.protocol, 'Safe');
+    assert.ok(innerSafeNode.params.children.some(c => c.dropped === true));
 
     const summary = await summarizeCalldata('ethereum', propose);
     assert.match(summary, /deeper call not expanded/i);
