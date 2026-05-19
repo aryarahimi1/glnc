@@ -23,11 +23,34 @@ export const ALL_SCHEMAS = Object.freeze(Object.values(SCHEMA));
 
 /**
  * @typedef {{
+ *   ok: boolean,
+ *   provider?: string,
+ *   source?: 'uniswap' | 'cache' | 'hardcoded',
+ *   cacheAgeSec?: number,
+ *   stale?: boolean,
+ *   rateLimited?: boolean,
+ *   fallback?: boolean,
+ *   chainsFailed?: string[],
+ *   unpriced?: string[],
+ * }} SourceMeta
+ */
+
+/**
+ * @typedef {{
+ *   sources?: { rpc?: SourceMeta, prices?: SourceMeta, tokenList?: SourceMeta },
+ *   partial?: boolean,
+ *   warnings?: string[],
+ * }} EnvelopeMeta
+ */
+
+/**
+ * @typedef {{
  *   schema: string,
  *   ts: string,
  *   ok: boolean,
  *   data?: any,
  *   event?: string,
- *   error?: { code: string, message: string } | null
+ *   error?: { code: string, message: string } | null,
+ *   meta?: EnvelopeMeta,
  * }} Envelope
  */

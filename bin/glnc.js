@@ -8,7 +8,8 @@
  * Exit codes:
  *   0 — success
  *   1 — user/input error
- *   2 — network/upstream error
+ *   2 — network/upstream error (all sources failed)
+ *   3 — partial result (some sources degraded) — only under --strict
  */
 
 import { parseArgs, ParseError } from '../src/cli/args.js';
@@ -63,6 +64,7 @@ switch (args.command) {
       await runBalance(args.addresses, args.chain, {
         json: args.json,
         ndjson: args.ndjson,
+        strict: args.strict,
         verbose: args.verbose,
         positions: args.positions,
         nfts: args.nfts,
@@ -91,6 +93,7 @@ switch (args.command) {
       await runGas(args.chain, {
         json: args.json,
         ndjson: args.ndjson,
+        strict: args.strict,
         verbose: args.verbose,
       });
     }

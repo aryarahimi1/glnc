@@ -5,7 +5,15 @@
  * Falls back to hardcoded TOKEN_LISTS from _evm.js on any failure.
  *
  * Exports:
- *   getTokenList(chainName) => Promise<{ symbol, contract, decimals, name }[]>
+ *   getTokenList(chainName)     => Promise<Token[]>
+ *   getTokenListMeta(chainName) => TokenListMeta | null
+ *   mergeTokenListMetas(...m)   => TokenListMeta
+ *
+ * Chain adapters call getTokenList() once per chain. The freshness/source
+ * metadata for that call is captured into a per-chain in-memory map keyed by
+ * chainName, readable via getTokenListMeta(). The balance pipeline reads it
+ * back after chain queries to surface source attribution in JSON output —
+ * no signature change required for the adapters.
  */
 
 import { getAddress } from 'viem';
@@ -27,14 +35,46 @@ const CHAIN_IDS = {
 // Keyed by chainName.
 const _resolved = new Map();
 
+// Per-chain meta captured during the resolving fetch. Keys mirror _resolved.
+// We store `fetchedAtMs` (the absolute timestamp at which the underlying
+// token list was acquired — either disk-cache `fetchedAt` or the time of the
+// fresh Uniswap fetch) so getTokenListMeta() can compute cacheAgeSec
+// dynamically. A long-running watch process that resolves the token list
+// once at start-up otherwise reports cacheAgeSec=0 forever.
+//
+// Internal value: { source, fetchedAtMs, fallback, ok }
+const _meta = new Map();
+
+/**
+ * @typedef {{
+ *   source: 'uniswap' | 'cache' | 'hardcoded',
+ *   cacheAgeSec: number,
+ *   fallback: boolean,
+ *   ok: boolean
+ * }} TokenListMeta
+ */
+
+/**
+ * Build the internal _meta record. `fetchedAtMs` is the wall-clock time of
+ * the underlying acquisition; the public-facing `cacheAgeSec` is derived
+ * from it at read time so it advances as the process runs.
+ *
+ * @param {'uniswap'|'cache'|'hardcoded'} source
+ * @param {number} fetchedAtMs
+ */
+function buildInternalMeta(source, fetchedAtMs) {
+  const fallback = source === 'hardcoded';
+  return { source, fetchedAtMs, fallback, ok: !fallback };
+}
+
 /**
  * Attempt to read from the disk cache written by src/tokens/cache.js.
- * Returns the raw token array or null if unavailable / stale.
+ * Returns the raw token array + fetchedAt or null if unavailable / stale.
  *
  * The cache module is written by a concurrent agent, so we import dynamically
  * and swallow any errors.
  *
- * @returns {Promise<{ tokens: object[] } | null>}
+ * @returns {Promise<{ tokens: object[], fetchedAt: number } | null>}
  */
 async function tryReadCache() {
   try {
@@ -108,9 +148,10 @@ function mergeWithHardcoded(discovered, hardcoded) {
  * filter to the requested chain, and return a normalised list.
  *
  * Always resolves — never throws.
- * Returns the hardcoded fallback list on any error.
+ * Returns the hardcoded fallback list on any error. The freshness metadata
+ * for the call is exposed via getTokenListMeta(chainName).
  *
- * @param {string} chainName  - one of 'ethereum' | 'polygon' | 'arbitrum' | 'base'
+ * @param {string} chainName
  * @returns {Promise<{ symbol: string, contract: string, decimals: number, name: string }[]>}
  */
 export async function getTokenList(chainName) {
@@ -122,6 +163,7 @@ export async function getTokenList(chainName) {
   const chainId = CHAIN_IDS[chainName];
   if (chainId === undefined) {
     process.stderr.write(`(unknown chainName "${chainName}" — falling back to hardcoded token list)\n`);
+    _meta.set(chainName, buildInternalMeta('hardcoded', Date.now()));
     return TOKEN_LISTS[chainName] ?? [];
   }
 
@@ -130,6 +172,14 @@ export async function getTokenList(chainName) {
   try {
     // ── 1. Try disk cache first ────────────────────────────────────────────────
     let rawData = await tryReadCache();
+    let source = /** @type {'uniswap'|'cache'} */ ('cache');
+    // Default to "now" so a fresh Uniswap fetch reports cacheAgeSec≈0. Disk
+    // cache hits replace this with the on-disk fetchedAt.
+    let fetchedAtMs = Date.now();
+
+    if (rawData && typeof rawData.fetchedAt === 'number') {
+      fetchedAtMs = rawData.fetchedAt;
+    }
 
     // ── 2. Fetch from Uniswap if cache miss ───────────────────────────────────
     if (!rawData) {
@@ -141,6 +191,8 @@ export async function getTokenList(chainName) {
         throw new Error(`Uniswap token list HTTP ${res.status}`);
       }
       rawData = await res.json();
+      source = 'uniswap';
+      fetchedAtMs = Date.now();
 
       // Persist to disk cache (best-effort)
       await tryWriteCache(rawData);
@@ -157,6 +209,7 @@ export async function getTokenList(chainName) {
 
     // Cache in-process so subsequent calls within the same process are free.
     _resolved.set(chainName, merged);
+    _meta.set(chainName, buildInternalMeta(source, fetchedAtMs));
 
     return merged;
   } catch (err) {
@@ -167,7 +220,71 @@ export async function getTokenList(chainName) {
       name: tok.name ?? tok.symbol,
     }));
 
-    // Don't cache the fallback — next call should retry the network.
+    // Don't cache the fallback list under _resolved — next call should retry
+    // the network — but DO record the failed-source meta so the JSON
+    // envelope can flag fallback=true on this run.
+    _meta.set(chainName, buildInternalMeta('hardcoded', Date.now()));
     return fallback;
   }
+}
+
+/**
+ * Read back the freshness metadata for the most recent getTokenList call on
+ * `chainName`. Returns null if getTokenList was never called for that chain
+ * in this process. `cacheAgeSec` is computed dynamically against the
+ * underlying `fetchedAtMs` so long-running watch processes see it advance.
+ *
+ * @param {string} chainName
+ * @returns {TokenListMeta | null}
+ */
+export function getTokenListMeta(chainName) {
+  const internal = _meta.get(chainName);
+  if (!internal) return null;
+  const cacheAgeSec = Math.max(0, Math.floor((Date.now() - internal.fetchedAtMs) / 1000));
+  return {
+    source: internal.source,
+    cacheAgeSec,
+    fallback: internal.fallback,
+    ok: internal.ok,
+  };
+}
+
+/**
+ * Combine multiple per-chain TokenListMeta records into a single one
+ * representing the worst case across chains:
+ *   - ok           AND across inputs
+ *   - fallback     true if ANY input fell back to hardcoded
+ *   - source       'uniswap' if all uniswap; 'cache' if any cache and none fallback; 'hardcoded' if any fallback
+ *   - cacheAgeSec  MAX
+ *
+ * @param {...(TokenListMeta|null|undefined)} metas
+ * @returns {TokenListMeta}
+ */
+export function mergeTokenListMetas(...metas) {
+  let ok = true;
+  let fallback = false;
+  let source = /** @type {'uniswap'|'cache'|'hardcoded'} */ ('uniswap');
+  let cacheAgeSec = 0;
+  let any = false;
+  let sawCache = false;
+  let sawFallback = false;
+  let sawUniswap = false;
+
+  for (const m of metas) {
+    if (!m) continue;
+    any = true;
+    if (!m.ok) ok = false;
+    if (m.fallback) { fallback = true; sawFallback = true; }
+    if (m.source === 'cache') sawCache = true;
+    if (m.source === 'uniswap') sawUniswap = true;
+    if (typeof m.cacheAgeSec === 'number' && m.cacheAgeSec > cacheAgeSec) {
+      cacheAgeSec = m.cacheAgeSec;
+    }
+  }
+
+  if (sawFallback) source = 'hardcoded';
+  else if (sawCache) source = 'cache';
+  else if (sawUniswap) source = 'uniswap';
+
+  return { ok: any ? ok : true, source, cacheAgeSec, fallback };
 }

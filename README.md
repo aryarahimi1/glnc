@@ -116,7 +116,7 @@ Per-command help is the canonical reference — `glnc balance --help`,
 | `--verbose` / `-v` | Show full addresses |
 | `--json` | Emit machine-readable JSON on stdout (NDJSON when combined with `--watch`) |
 | `--ndjson` | Force NDJSON even for one-shot commands |
-| `--strict` | In `--watch --json`, abort on the first fetch error instead of emitting an `error` event and continuing |
+| `--strict` | One-shot: exit **3** on a partial result (see `meta.partial`). Watch: abort on the first fetch *exception* instead of emitting an `error` event (partial polls keep streaming). Default keeps exit code 0 for scripts already in production. |
 | `--no-color` | Disable ANSI colors. `NO_COLOR` env and `--json`/`--ndjson` also disable colors |
 
 ---
@@ -432,6 +432,7 @@ Every JSON / NDJSON line glnc emits has the same shape:
   "ok":     true,
   "data":   { /* command-specific payload */ },
   "error":  null,
+  "meta":   { /* freshness + source attribution; see below */ },
   // NDJSON-only:
   "event":  "poll" | "error" | "stop" | "evaluated"
 }
@@ -440,6 +441,44 @@ Every JSON / NDJSON line glnc emits has the same shape:
 On error, `ok` is `false`, `data` is `null`, and `error` is `{ code, message }`.
 **New optional fields are additive** within a `vN`; the version bumps only on
 breaking changes.
+
+### Source metadata (`meta`)
+
+`balance` and `gas` envelopes (one-shot and watch) carry an optional `meta`
+block so scripted consumers can tell whether a price came from a fresh
+CoinGecko call or from a cached value, whether the token list fell back to
+the hardcoded fallback, and whether any chain RPC failed.
+
+```jsonc
+"meta": {
+  "sources": {
+    "rpc":       { "ok": true,  "chainsFailed": [] },
+    "prices":    { "ok": true,  "provider": "coingecko",
+                   "cacheAgeSec": 12, "stale": false,
+                   "rateLimited": false, "unpriced": ["XYZ"] },
+    "tokenList": { "ok": true,  "source": "uniswap",
+                   "cacheAgeSec": 0, "fallback": false }
+  },
+  "partial":  false,         // true if ANY source above degraded
+  "warnings": []
+}
+```
+
+- `prices.cacheAgeSec` is the age of the **oldest** price in the response (so
+  a single fresh fetch surfaces 0; a 59s-cached fetch surfaces 59).
+- `prices.stale` is `true` only when an upstream call failed and the response
+  is built entirely from beyond-TTL cache.
+- `prices.rateLimited` is `true` when CoinGecko returned 429 at any point
+  during this call (sticky — set on the first 429, not cleared if a later
+  retry succeeded). Distinct from `priceUsd: null` for tokens CoinGecko
+  doesn't know — those land in `prices.unpriced` instead. `unpriced` is a
+  heterogenous bag: uppercase symbols (`"XYZ"`) for symbol-keyed lookups and
+  lowercase `0x…` contract addresses for long-tail tokens.
+- `tokenList.source` is `"uniswap"` (fresh), `"cache"` (served from the 24h
+  `~/.glnc/token-cache.json`), or `"hardcoded"` (the in-repo fallback list).
+- `partial` is the consolidated signal: `true` if RPC, prices, or token-list
+  degraded in any way for this call. **Combine with `--strict` for scripted
+  short-circuit** (see exit codes).
 
 ### Schema reference
 
@@ -556,7 +595,8 @@ glnc balance $WALLET --json \
 - Always pass `2>/dev/null` (or redirect to a log file) when piping stdout into another tool — progress chatter is intentional but not part of the API.
 - For `jq` in a streaming context, use `--unbuffered` (and `-c` for one object per line) to keep the pipeline reactive.
 - The `poll` counter resets per process — use it to detect first-run vs steady-state if you want to skip noisy initial-state events.
-- `--strict` makes `--watch --json` exit non-zero on the first fetch error; the default keeps streaming and emits an `error` event you can filter on.
+- `--strict` has two distinct semantics depending on mode. **One-shot** (`balance`/`gas` without `--watch`): a partial result (any source degraded — see `meta.partial`) exits **3** instead of 0. **Watch mode** (`balance`/`gas` with `--watch`): aborts on the first fetch *exception* instead of emitting an `error` event and continuing — the loop keeps streaming on `meta.partial: true` polls so consumers can `jq 'select(.meta.partial == false)'` for themselves. Without `--strict`, default behavior is preserved (exit 0 with `meta.partial` embedded) so scripts already in production don't regress.
+- Gate scripted automation on `meta.partial` and `meta.sources.prices.rateLimited` before mutating anything — `priceUsd: null` could mean "CoinGecko doesn't know this token" *or* "we got rate-limited"; `meta` is how you tell them apart.
 - Use `--ndjson` to force one-object-per-line output even on one-shot commands (handy when piping through tools that prefer line-delimited input).
 
 ---
@@ -588,6 +628,7 @@ per-attempt timeout and an operator-supplied URL, this is an accepted trade-off.
 | `0` | Success |
 | `1` | User/input error (bad address, unknown command, unsupported `--chain` for the subcommand) |
 | `2` | All network requests failed |
+| `3` | Partial result — some sources degraded (`meta.partial: true`). Only emitted under `--strict`; default behavior surfaces partial state in `meta` and exits 0. |
 
 ---
 

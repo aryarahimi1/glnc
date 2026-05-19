@@ -19,10 +19,21 @@
  *   0 — success
  *   1 — user error (bad address / hash / command)
  *   2 — all network requests failed
+ *   3 — partial result (some sources degraded) — only under --strict
  */
 
+// EVM chains that consult the Uniswap token list. Used to scope which
+// per-chain token-list metas we collect into the envelope meta block.
+const EVM_TOKEN_LIST_CHAINS = ['ethereum', 'polygon', 'arbitrum', 'base', 'optimism', 'linea', 'zksync'];
+
 import { getAddress } from 'viem';
-import { getPrices, getTokenPrices } from './prices.js';
+import {
+  getPrices,
+  getPricesWithMeta,
+  getTokenPricesWithMeta,
+  mergePricesMeta,
+} from './prices.js';
+import { getTokenListMeta, mergeTokenListMetas } from './tokens/index.js';
 import { readSnapshot, writeSnapshot } from './snapshots.js';
 import { isBitcoinLegacyChecksumValid } from './chains/_base58check.js';
 import { isBitcoinBech32Valid } from './chains/_bech32.js';
@@ -418,7 +429,7 @@ async function queryWallet(resolvedAddress, chainFilter, opts, sem) {
  * @param {string | string[]} addressInput
  * @param {string|null} chainFilter
  * @param {{ json?: boolean, verbose?: boolean, positions?: boolean }} opts
- * @returns {Promise<{ wallets: WalletResult[], prices: Record<string, number> }>}
+ * @returns {Promise<{ wallets: WalletResult[], prices: Record<string, number>, meta: object }>}
  */
 async function fetchBalances(addressInput, chainFilter, opts) {
   const addresses = Array.isArray(addressInput) ? addressInput : [addressInput];
@@ -465,11 +476,15 @@ async function fetchBalances(addressInput, chainFilter, opts) {
   }
 
   let prices = {};
+  let symbolMeta = null;
   if (symbols.size > 0) {
     try {
-      prices = await getPrices([...symbols]);
+      const got = await getPricesWithMeta([...symbols]);
+      prices = got.prices;
+      symbolMeta = got.meta;
     } catch {
-      // Non-fatal — render without USD values
+      // Non-fatal — render without USD values; flag prices as not OK below.
+      symbolMeta = { ok: false, provider: 'coingecko', cacheAgeSec: 0, stale: false, rateLimited: false, unpriced: [] };
     }
   }
 
@@ -489,19 +504,64 @@ async function fetchBalances(addressInput, chainFilter, opts) {
       }
     }
   }
+  const contractMetas = [];
   for (const [chain, entries] of contractsByChain) {
     try {
       const addrs = [...new Set(entries.map(e => e.addr))];
-      const contractPrices = await getTokenPrices(chain, addrs);
+      const got = await getTokenPricesWithMeta(chain, addrs);
+      contractMetas.push(got.meta);
       for (const { addr, sym } of entries) {
-        if (contractPrices[addr] !== undefined && prices[sym] === undefined) {
-          prices[sym] = contractPrices[addr];
+        if (got.prices[addr] !== undefined && prices[sym] === undefined) {
+          prices[sym] = got.prices[addr];
         }
       }
     } catch {
-      // Non-fatal
+      contractMetas.push({ ok: false, provider: 'coingecko', cacheAgeSec: 0, stale: false, rateLimited: false, unpriced: [] });
     }
   }
+
+  // ── Aggregate meta ────────────────────────────────────────────────────────
+  const pricesMeta = mergePricesMeta(symbolMeta, ...contractMetas);
+
+  // Collect chains touched (across all wallets) + which failed
+  const chainsTouched = new Set();
+  const chainsFailed = new Set();
+  for (const wallet of wallets) {
+    for (const r of wallet.results) {
+      chainsTouched.add(r.chain);
+      if (r.error || r.result?.error) chainsFailed.add(r.chain);
+    }
+  }
+  const rpcMeta = {
+    ok: chainsFailed.size === 0,
+    chainsFailed: [...chainsFailed],
+  };
+
+  // Per-chain token-list meta for any EVM chain we touched
+  const tokenMetas = [];
+  for (const chain of chainsTouched) {
+    if (!EVM_TOKEN_LIST_CHAINS.includes(chain)) continue;
+    const m = getTokenListMeta(chain);
+    if (m) tokenMetas.push(m);
+  }
+  const tokenListMeta = tokenMetas.length > 0
+    ? mergeTokenListMetas(...tokenMetas)
+    : null;
+
+  const partial =
+    !rpcMeta.ok ||
+    (pricesMeta && pricesMeta.ok === false) ||
+    (tokenListMeta && tokenListMeta.fallback === true);
+
+  const meta = {
+    sources: {
+      rpc: rpcMeta,
+      ...(pricesMeta ? { prices: pricesMeta } : {}),
+      ...(tokenListMeta ? { tokenList: tokenListMeta } : {}),
+    },
+    partial: !!partial,
+    warnings: [],
+  };
 
   // Apply dust filtering for EVM chains
   const filterDust = await loadFilterDust();
@@ -525,7 +585,7 @@ async function fetchBalances(addressInput, chainFilter, opts) {
     }
   }
 
-  return { wallets, prices };
+  return { wallets, prices, meta };
 }
 
 // ---------------------------------------------------------------------------
@@ -543,6 +603,7 @@ async function fetchBalances(addressInput, chainFilter, opts) {
 export async function runBalance(addresses, chainFilter, opts = {}) {
   const json    = !!opts.json;
   const ndjson  = !!opts.ndjson;
+  const strict  = !!opts.strict;
   const emit    = ndjson ? emitNDJSON : emitJSON;
   const verbose = !!opts.verbose;
 
@@ -597,13 +658,18 @@ export async function runBalance(addresses, chainFilter, opts = {}) {
     }
   }
 
-  const { wallets, prices } = await fetchBalances(addrArray, chainFilter, opts);
+  const { wallets, prices, meta } = await fetchBalances(addrArray, chainFilter, opts);
 
   const multiWallet = addrArray.length > 1;
 
   if (json) {
-    // JSON mode: emit all wallets in a single envelope
-    emit(wrap(SCHEMA.BALANCE, buildBalanceData(wallets, prices)));
+    // JSON mode: emit all wallets in a single envelope, with source meta
+    emit(wrap(SCHEMA.BALANCE, buildBalanceData(wallets, prices), meta));
+    // Strict mode: partial result → exit 3 so scripts can gate on it.
+    // Default behavior (no --strict) preserves exit 0 for backward compat.
+    if (strict && meta?.partial) {
+      process.exitCode = 3;
+    }
     return;
   }
 
@@ -638,6 +704,10 @@ export async function runBalance(addresses, chainFilter, opts = {}) {
   );
   if (allFailed && wallets.length > 0) {
     process.exitCode = 2;
+  } else if (strict && meta?.partial) {
+    // Partial result under --strict → exit 3. Takes precedence over 0 but
+    // not over 2 (which is a strictly worse state).
+    process.exitCode = 3;
   }
 }
 
@@ -722,9 +792,9 @@ export async function runWatch(addresses, chainFilter, opts = {}) {
       }
 
       // Fetch balances; in JSON mode failures don't kill the loop unless --strict.
-      let wallets, prices;
+      let wallets, prices, pollMeta;
       try {
-        ({ wallets, prices } = await fetchBalances(addrArray, chainFilter, opts));
+        ({ wallets, prices, meta: pollMeta } = await fetchBalances(addrArray, chainFilter, opts));
       } catch (err) {
         if (json) {
           emitNDJSON(wrapEvent(SCHEMA.BALANCE_WATCH, 'error', {
@@ -798,6 +868,7 @@ export async function runWatch(addresses, chainFilter, opts = {}) {
           fetchMs: lastRefreshMs,
           data,
           delta,
+          meta: pollMeta,
         }));
         prevPollData = data;
       } else {
@@ -1125,6 +1196,7 @@ export async function runGas(chainFilter, opts = {}) {
   const json = !!opts.json;
   const ndjson = !!opts.ndjson;
   const machine = json || ndjson;
+  const strict = !!opts.strict;
   const emit = ndjson ? emitNDJSON : emitJSON;
   const verbose = !!opts.verbose;
 
@@ -1160,14 +1232,20 @@ export async function runGas(chainFilter, opts = {}) {
 
   // Native prices for USD cost columns. Cached for 60s by prices.js.
   let prices = {};
+  let pricesMeta = null;
   try {
-    prices = await getPrices(GAS_PRICE_SYMBOLS);
+    const got = await getPricesWithMeta(GAS_PRICE_SYMBOLS);
+    prices = got.prices;
+    pricesMeta = got.meta;
   } catch {
     // Cost column will render '—' on price failure; not fatal.
+    pricesMeta = { ok: false, provider: 'coingecko', cacheAgeSec: 0, stale: false, rateLimited: false, unpriced: [] };
   }
 
+  const gasMeta = buildGasMeta(results, pricesMeta);
+
   if (json) {
-    emit(wrap(SCHEMA.GAS, buildGasData(results, prices)));
+    emit(wrap(SCHEMA.GAS, buildGasData(results, prices), gasMeta));
   } else {
     renderGas(results, prices, { verbose });
   }
@@ -1175,7 +1253,37 @@ export async function runGas(chainFilter, opts = {}) {
   // Exit non-zero only if every chain failed.
   if (results.every(r => r.error)) {
     process.exitCode = 2;
+  } else if (strict && gasMeta.partial) {
+    process.exitCode = 3;
   }
+}
+
+/**
+ * Build the envelope meta block for a gas response. Aggregates per-chain RPC
+ * outcome (which chains failed), the price-source meta, and a top-level
+ * `partial` flag so scripted consumers can detect degraded results.
+ *
+ * @param {import('./gas.js').GasResult[]} results
+ * @param {object|null} pricesMeta
+ * @returns {object}
+ */
+function buildGasMeta(results, pricesMeta) {
+  const chainsFailed = results.filter(r => r.error).map(r => r.chain);
+  const rpcMeta = {
+    ok: chainsFailed.length === 0,
+    chainsFailed,
+  };
+  const partial =
+    !rpcMeta.ok ||
+    (pricesMeta && pricesMeta.ok === false);
+  return {
+    sources: {
+      rpc: rpcMeta,
+      ...(pricesMeta ? { prices: pricesMeta } : {}),
+    },
+    partial: !!partial,
+    warnings: [],
+  };
 }
 
 /**
@@ -1278,12 +1386,18 @@ export async function runGasWatch(chainFilter, opts = {}) {
         );
       }
 
-      let results, prices;
+      let results, prices, pricesMeta;
       try {
-        [results, prices] = await Promise.all([
+        const [gasRes, pricesRes] = await Promise.all([
           getAllGas(chains),
-          getPrices(GAS_PRICE_SYMBOLS).catch(() => ({})),
+          getPricesWithMeta(GAS_PRICE_SYMBOLS).catch(() => ({
+            prices: {},
+            meta: { ok: false, provider: 'coingecko', cacheAgeSec: 0, stale: false, rateLimited: false, unpriced: [] },
+          })),
         ]);
+        results = gasRes;
+        prices = pricesRes.prices;
+        pricesMeta = pricesRes.meta;
       } catch (err) {
         if (json) {
           emitNDJSON(wrapEvent(SCHEMA.GAS_WATCH, 'error', {
@@ -1310,6 +1424,7 @@ export async function runGasWatch(chainFilter, opts = {}) {
           intervalSec: intervalSecs,
           fetchMs: lastRefreshMs,
           data: buildGasData(results, prices),
+          meta: buildGasMeta(results, pricesMeta),
         }));
       } else {
         renderGas(results, prices, { verbose });

@@ -1590,7 +1590,9 @@ ${c.bold('FLAGS')}
   --verbose / -v      show full addresses
   --json              emit JSON envelope on stdout (NDJSON when --watch)
   --ndjson            force NDJSON even for one-shot
-  --strict            in --watch --json, exit non-zero on fetch error
+  --strict            exit 3 on a partial result (any source degraded — see
+                      meta.partial). In --watch --json, also abort on first
+                      fetch error instead of emitting an error event.
   --no-color          disable ANSI colors
 
 ${c.bold('EXAMPLES')}

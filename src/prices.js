@@ -4,10 +4,16 @@
  * Fetch USD prices from CoinGecko's free public API.
  * Caches results in-memory for 60 seconds per entry.
  *
- * Exports:
- *   getPrices(symbols: string[])                       => Promise<Record<string, number>>
- *   getPrice(symbol: string)                           => Promise<number>   (0 if unknown)
- *   getTokenPrices(chainName, contractAddresses)       => Promise<Record<string, number>>
+ * Two flavours of each lookup:
+ *   - getPrices / getTokenPrices       → return { SYMBOL: number } directly
+ *   - getPricesWithMeta /
+ *     getTokenPricesWithMeta           → return { prices, meta } where meta
+ *                                        carries provider, ok, cacheAgeSec,
+ *                                        stale, rateLimited, unpriced[]
+ *
+ * The plain-map variants are kept for callers that never look at freshness
+ * (alert/gas paths). The balance pipeline uses the With-Meta variants so the
+ * JSON envelope can expose source freshness to scripted consumers.
  *
  * symbol is case-insensitive and mapped to CoinGecko IDs internally.
  * contractAddresses are lowercased EVM contract addresses.
@@ -58,37 +64,47 @@ const BATCH_SIZE = 100; // CoinGecko URL length safety limit
  * thrown errors (network/timeouts). A fresh AbortSignal is created per attempt
  * so the timeout is not consumed by the inter-attempt wait.
  *
+ * Returns { res, rateLimited, networkErrored } so the caller can tell apart
+ * "non-2xx response" from "all attempts threw" from "rate-limited even after
+ * the final retry."
+ *
  * @param {string} url
  * @param {number} timeoutMs  - per-attempt timeout
  * @param {number} [maxRetries=3]
- * @returns {Promise<Response>}
+ * @returns {Promise<{ res: Response|null, rateLimited: boolean, networkErrored: boolean }>}
  */
 async function fetchWithRetry(url, timeoutMs, maxRetries = 3) {
   const headers = { Accept: 'application/json' };
   let delay = 1_000;
-  let lastErr;
+  let rateLimited = false;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let res;
     try {
       res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
     } catch (err) {
       // Network error / timeout / abort — retry unless we're out of attempts.
-      lastErr = err;
-      if (attempt === maxRetries) throw err;
+      if (attempt === maxRetries) {
+        return { res: null, rateLimited, networkErrored: true };
+      }
       await new Promise(r => setTimeout(r, delay));
       delay *= 2;
       continue;
     }
+    if (res.status === 429) rateLimited = true;
     // Success or non-transient failure (4xx other than 429) → return it.
-    if (res.status !== 429 && res.status < 500) return res;
-    if (attempt === maxRetries) return res;
+    if (res.status !== 429 && res.status < 500) {
+      return { res, rateLimited, networkErrored: false };
+    }
+    if (attempt === maxRetries) {
+      return { res, rateLimited, networkErrored: false };
+    }
     const ra = res.headers.get('Retry-After');
     const wait = ra ? Math.min(Number(ra) * 1_000, 30_000) : delay;
     await new Promise(r => setTimeout(r, wait));
     delay *= 2;
   }
-  // Unreachable in practice — the loop either returns or throws above.
-  throw lastErr ?? new Error('fetchWithRetry: exhausted retries');
+  // Unreachable — every loop iteration either returns or `continue`s past.
+  return { res: null, rateLimited, networkErrored: true };
 }
 
 /**
@@ -102,15 +118,42 @@ function isFresh(entry) {
 }
 
 /**
- * Fetch prices for the given ticker symbols.
- * Returns a map of { SYMBOL_UPPERCASE: usdPrice }.
- * Symbols that are unknown or fail are omitted.
- * De-duplicates: cached symbols are not re-fetched until TTL expires.
+ * Empty meta block — the shape used when no upstream fetch was attempted at
+ * all (e.g. zero symbols requested).
+ *
+ * @returns {{ ok: boolean, provider: string, cacheAgeSec: number, stale: boolean, rateLimited: boolean, unpriced: string[] }}
+ */
+function freshMeta() {
+  return {
+    ok: true,
+    provider: 'coingecko',
+    cacheAgeSec: 0,
+    stale: false,
+    rateLimited: false,
+    unpriced: [],
+  };
+}
+
+/**
+ * Fetch prices for the given ticker symbols, returning a structured envelope
+ * carrying both the price map and freshness metadata.
+ *
+ * `meta.ok`         — true unless every attempted upstream call failed.
+ * `meta.cacheAgeSec` — age of the OLDEST price returned (worst case).
+ * `meta.stale`       — true iff any returned price was past the 60s TTL when
+ *                      served from cache (only possible on upstream failure).
+ * `meta.rateLimited` — STICKY: true if CoinGecko returned 429 at any point
+ *                      during this call, even if a subsequent retry returned
+ *                      a 2xx. Treat it as "we saw rate-limit pressure," not
+ *                      as "every attempt failed."
+ * `meta.unpriced`    — symbols we know about but couldn't price (or unknown).
+ *                      Always uppercase ticker symbols from this function.
  *
  * @param {string[]} symbols
- * @returns {Promise<Record<string, number>>}
+ * @returns {Promise<{ prices: Record<string, number>, meta: ReturnType<typeof freshMeta> }>}
  */
-export async function getPrices(symbols) {
+export async function getPricesWithMeta(symbols) {
+  const meta = freshMeta();
   const normalised = [...new Set(symbols.map(s => s.toLowerCase()))];
 
   // Only fetch symbols whose cached entry is absent or stale
@@ -121,36 +164,73 @@ export async function getPrices(symbols) {
     return !cached || !isFresh(cached);
   });
 
+  let networkAttempted = false;
+  let networkSucceeded = false;
+
   if (missing.length > 0) {
     const ids = [...new Set(missing.map(s => SYMBOL_TO_ID[s]).filter(Boolean))];
     if (ids.length > 0) {
-      try {
-        const url =
-          `${COINGECKO_BASE}/simple/price?ids=${ids.join(',')}&vs_currencies=usd`;
-        const res = await fetchWithRetry(url, 8_000);
-        if (res.ok) {
+      networkAttempted = true;
+      const url =
+        `${COINGECKO_BASE}/simple/price?ids=${ids.join(',')}&vs_currencies=usd`;
+      const { res, rateLimited, networkErrored } = await fetchWithRetry(url, 8_000);
+      if (rateLimited) meta.rateLimited = true;
+      if (res && res.ok) {
+        try {
           const data = await res.json();
           for (const [id, val] of Object.entries(data)) {
             priceCache.set(id, { price: val?.usd ?? 0, cachedAt: Date.now() });
           }
+          networkSucceeded = true;
+        } catch {
+          // Malformed JSON — treat as network failure, fall through to cache.
         }
-      } catch {
-        // Network failure — return whatever is cached
+      } else if (networkErrored) {
+        // No response at all — treat as upstream failure.
       }
     }
   }
 
+  if (networkAttempted && !networkSucceeded) {
+    meta.ok = false;
+  }
+
   const result = {};
+  let oldestAgeMs = 0;
+  const now = Date.now();
+
   for (const sym of normalised) {
     const id = SYMBOL_TO_ID[sym];
-    if (id) {
-      const cached = priceCache.get(id);
-      if (cached) {
-        result[sym.toUpperCase()] = cached.price;
-      }
+    if (!id) {
+      meta.unpriced.push(sym.toUpperCase());
+      continue;
+    }
+    const cached = priceCache.get(id);
+    if (cached) {
+      result[sym.toUpperCase()] = cached.price;
+      const ageMs = now - cached.cachedAt;
+      if (ageMs > oldestAgeMs) oldestAgeMs = ageMs;
+    } else {
+      meta.unpriced.push(sym.toUpperCase());
     }
   }
-  return result;
+
+  meta.cacheAgeSec = Math.floor(oldestAgeMs / 1000);
+  meta.stale = oldestAgeMs > PRICE_TTL_MS;
+
+  return { prices: result, meta };
+}
+
+/**
+ * Backwards-compatible flat-map flavour.
+ * Symbols that are unknown or fail are omitted.
+ *
+ * @param {string[]} symbols
+ * @returns {Promise<Record<string, number>>}
+ */
+export async function getPrices(symbols) {
+  const { prices } = await getPricesWithMeta(symbols);
+  return prices;
 }
 
 /**
@@ -165,36 +245,31 @@ export async function getPrice(symbol) {
 }
 
 /**
- * Fetch USD prices for EVM tokens identified by contract address.
+ * Fetch USD prices for EVM tokens identified by contract address, with meta.
  *
- * Uses CoinGecko's token_price endpoint.  Batches in groups of 100 addresses
- * and runs batches sequentially to stay within rate limits.
- * Results are cached in-memory for 60 seconds keyed by `${chainName}:${address}`.
- *
- * On any fetch error the function returns whatever was previously cached for
- * the requested addresses — it never throws.
- *
- * @param {string}   chainName          - one of 'ethereum' | 'polygon' | 'arbitrum' | 'base'
+ * @param {string}   chainName
  * @param {string[]} contractAddresses  - lowercased EVM contract addresses
- * @returns {Promise<Record<string, number>>}  - { [lowercased_address]: usdPrice }
+ * @returns {Promise<{ prices: Record<string, number>, meta: ReturnType<typeof freshMeta> }>}
  */
-export async function getTokenPrices(chainName, contractAddresses) {
+export async function getTokenPricesWithMeta(chainName, contractAddresses) {
+  const meta = freshMeta();
+
   const platform = CHAIN_TO_PLATFORM[chainName];
   if (!platform || !contractAddresses || contractAddresses.length === 0) {
-    return {};
+    return { prices: {}, meta };
   }
 
-  // Normalise addresses to lowercase
   const addresses = [...new Set(contractAddresses.map(a => a.toLowerCase()))];
 
-  // Separate stale/missing from already-fresh
   const toFetch = addresses.filter(addr => {
-    const key    = `${chainName}:${addr}`;
-    const cached = contractPriceCache.get(key);
+    const cached = contractPriceCache.get(`${chainName}:${addr}`);
     return !cached || !isFresh(cached);
   });
 
-  // ── Batch-fetch stale/missing addresses sequentially ────────────────────────
+  let networkAttempted = false;
+  let networkSucceeded = false;
+
+  // ── Batch-fetch stale/missing addresses sequentially ───────────────────────
   for (let i = 0; i < toFetch.length; i += BATCH_SIZE) {
     const batch = toFetch.slice(i, i + BATCH_SIZE);
     const csv   = batch.join(',');
@@ -202,35 +277,101 @@ export async function getTokenPrices(chainName, contractAddresses) {
       `${COINGECKO_BASE}/simple/token_price/${platform}` +
       `?contract_addresses=${csv}&vs_currencies=usd`;
 
-    try {
-      const res = await fetchWithRetry(url, 10_000);
-      if (res.ok) {
+    networkAttempted = true;
+    const { res, rateLimited } = await fetchWithRetry(url, 10_000);
+    if (rateLimited) meta.rateLimited = true;
+    if (res && res.ok) {
+      try {
         const data = await res.json();
         for (const [addr, val] of Object.entries(data)) {
           const normAddr = addr.toLowerCase();
-          const usd      = val?.usd;
+          const usd = val?.usd;
           if (typeof usd === 'number') {
             contractPriceCache.set(`${chainName}:${normAddr}`, {
-              price:    usd,
+              price: usd,
               cachedAt: Date.now(),
             });
           }
         }
+        // One successful batch is enough to flip the flag.
+        networkSucceeded = true;
+      } catch {
+        // Malformed JSON — fall through to cache.
       }
-      // If response is not ok — fall through and return whatever is cached
-    } catch {
-      // Network error — fall through and return whatever is cached
     }
   }
 
-  // ── Build result from cache (fresh + just-fetched) ──────────────────────────
+  if (networkAttempted && !networkSucceeded) {
+    meta.ok = false;
+  }
+
   const result = {};
+  let oldestAgeMs = 0;
+  const now = Date.now();
+
   for (const addr of addresses) {
-    const key    = `${chainName}:${addr}`;
-    const cached = contractPriceCache.get(key);
+    const cached = contractPriceCache.get(`${chainName}:${addr}`);
     if (cached) {
       result[addr] = cached.price;
+      const ageMs = now - cached.cachedAt;
+      if (ageMs > oldestAgeMs) oldestAgeMs = ageMs;
+    } else {
+      meta.unpriced.push(addr);
     }
   }
-  return result;
+
+  meta.cacheAgeSec = Math.floor(oldestAgeMs / 1000);
+  meta.stale = oldestAgeMs > PRICE_TTL_MS;
+
+  return { prices: result, meta };
+}
+
+/**
+ * Backwards-compatible flat-map flavour for contract-address prices.
+ *
+ * @param {string}   chainName
+ * @param {string[]} contractAddresses
+ * @returns {Promise<Record<string, number>>}
+ */
+export async function getTokenPrices(chainName, contractAddresses) {
+  const { prices } = await getTokenPricesWithMeta(chainName, contractAddresses);
+  return prices;
+}
+
+/**
+ * Merge two price meta blocks into a single combined block. Used when a
+ * caller pulls both symbol-keyed and contract-keyed prices in the same flow
+ * (the balance command) and wants one consolidated `meta.sources.prices`.
+ *
+ * - `ok`           AND across inputs (any failure makes the combined block not-ok)
+ * - `rateLimited`  OR  across inputs
+ * - `stale`        OR  across inputs
+ * - `cacheAgeSec`  MAX of inputs
+ * - `unpriced`     concat + de-dup. NOTE: this is a heterogenous bag —
+ *                  uppercase ticker symbols from getPricesWithMeta and
+ *                  lowercase 0x… contract addresses from
+ *                  getTokenPricesWithMeta. They denote the same conceptual
+ *                  "couldn't price this thing" outcome but consumers
+ *                  inspecting `unpriced` should expect both forms.
+ *
+ * @param {...({ ok: boolean, provider: string, cacheAgeSec: number, stale: boolean, rateLimited: boolean, unpriced: string[] })} blocks
+ */
+export function mergePricesMeta(...blocks) {
+  const merged = freshMeta();
+  const unpriced = new Set();
+  let any = false;
+  for (const m of blocks) {
+    if (!m) continue;
+    any = true;
+    if (!m.ok) merged.ok = false;
+    if (m.rateLimited) merged.rateLimited = true;
+    if (m.stale) merged.stale = true;
+    if (typeof m.cacheAgeSec === 'number' && m.cacheAgeSec > merged.cacheAgeSec) {
+      merged.cacheAgeSec = m.cacheAgeSec;
+    }
+    for (const sym of m.unpriced ?? []) unpriced.add(sym);
+  }
+  if (!any) return merged;
+  merged.unpriced = [...unpriced];
+  return merged;
 }

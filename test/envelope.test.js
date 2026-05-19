@@ -35,6 +35,26 @@ describe('wrap', () => {
     const env = wrap(SCHEMA.TX, {});
     assert.equal(env.ok, true);
   });
+
+  it('omits meta when no meta is passed (backward-compatible)', () => {
+    const env = wrap(SCHEMA.BALANCE, { eth: '1.0' });
+    assert.equal('meta' in env, false, 'meta must not appear when not supplied');
+  });
+
+  it('includes meta verbatim when supplied', () => {
+    const meta = {
+      sources: { prices: { ok: true, cacheAgeSec: 12 } },
+      partial: false,
+      warnings: [],
+    };
+    const env = wrap(SCHEMA.BALANCE, {}, meta);
+    assert.deepEqual(env.meta, meta);
+  });
+
+  it('omits meta when explicitly passed null', () => {
+    const env = wrap(SCHEMA.BALANCE, {}, null);
+    assert.equal('meta' in env, false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -89,6 +109,17 @@ describe('wrapEvent', () => {
   it('defaults ok to true when not supplied', () => {
     const env = wrapEvent(SCHEMA.GAS_WATCH, 'poll', {});
     assert.equal(env.ok, true);
+  });
+
+  it('omits meta when not supplied', () => {
+    const env = wrapEvent(SCHEMA.BALANCE_WATCH, 'poll', { data: {} });
+    assert.equal('meta' in env, false);
+  });
+
+  it('includes meta in the envelope when supplied via fields', () => {
+    const meta = { sources: { rpc: { ok: true, chainsFailed: [] } }, partial: false, warnings: [] };
+    const env = wrapEvent(SCHEMA.BALANCE_WATCH, 'poll', { data: {}, meta });
+    assert.deepEqual(env.meta, meta);
   });
 });
 
