@@ -33,4 +33,8 @@ Out of scope:
 - Issues that require physical access to the user's machine.
 - Reports that depend on already-compromised credentials or the user knowingly running malicious input.
 
+## Webhook redirect policy
+
+`glnc alert` webhook delivery uses `redirect: 'error'` on the underlying HTTP client: **redirects are never followed**. A 3xx response is treated as a failed delivery and may be retried (for 5xx-style retry rules), not chased to a new host. This closes SSRF rebinding via redirect-to-internal-IP.
+
 Thanks for helping keep glnc and its users safe.

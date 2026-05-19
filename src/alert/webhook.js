@@ -396,6 +396,7 @@ export async function postWebhook(url, payload, { dryRun = false } = {}) {
         };
       }
       // 3xx (redirect not followed) or 5xx: retry if attempts remain
+      // SECURITY: redirects are deliberately NOT followed. If you ever enable redirect-following, parse the Location header host and pass IP literals straight to isBlockedIP() — never re-resolve via DNS, or you reopen the rebind window the lookup pin at :341 closes.
       lastError = `HTTP ${res.status}`;
     } else {
       lastError = res.error;

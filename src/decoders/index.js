@@ -24,6 +24,7 @@
 
 import { decodeAbiParameters, formatUnits, parseAbiParameters } from 'viem';
 import { lookupSelector } from './registry.js';
+import { decodeMultiSend } from './multisend.js';
 import { getChainAdapter } from '../chains/index.js';
 import { fetchTokenMeta } from '../chains/_evm.js';
 import { getPrice } from '../prices.js';
@@ -51,6 +52,10 @@ const CHAIN_CLIENT_CONFIG = {
 };
 
 const clientCache = new Map();
+
+const MAX_NESTED_DEPTH  = 2;
+const MAX_NESTED_BYTES  = 65_536;
+const MULTISEND_SELECTOR = '0x8d80ff0a';
 
 function getClient(chainName) {
   if (clientCache.has(chainName)) return clientCache.get(chainName);
@@ -99,6 +104,162 @@ function decodeCalldata(registryEntry, calldata) {
   } catch {
     return {};
   }
+}
+
+function normalizeBytesToHex(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    if (!value || value === '0x') return null;
+    return value.startsWith('0x') ? value : `0x${value}`;
+  }
+  if (value instanceof Uint8Array) {
+    if (value.length === 0) return null;
+    let hex = '0x';
+    for (const b of value) hex += b.toString(16).padStart(2, '0');
+    return hex;
+  }
+  return null;
+}
+
+function hexPayloadByteLength(hex) {
+  if (!hex || typeof hex !== 'string') return 0;
+  const body = hex.startsWith('0x') ? hex.slice(2) : hex;
+  return Math.floor(body.length / 2);
+}
+
+function shouldRecurseBytesField(registryEntry, fieldName) {
+  if (registryEntry.protocol === 'Safe' && registryEntry.name === 'execTransaction') {
+    return fieldName === 'data';
+  }
+  return true;
+}
+
+function attachNestedChild(children, child) {
+  children.push(child);
+}
+
+function decodeNested(calldata, depth, byteBudget) {
+  const normalized = calldata?.startsWith('0x') ? calldata : `0x${calldata ?? ''}`;
+  const payloadBytes = hexPayloadByteLength(normalized);
+  if (byteBudget + payloadBytes > MAX_NESTED_BYTES) {
+    return { registryEntry: null, params: { children: [{ dropped: true }] } };
+  }
+  const nextBudget = byteBudget + payloadBytes;
+
+  const registryEntry = lookupSelector(normalized);
+  if (!registryEntry) {
+    return {
+      registryEntry: null,
+      params: {
+        children: [{ selector: normalized.slice(0, 10), dropped: false }],
+      },
+    };
+  }
+
+  let params;
+  try {
+    params = decodeCalldata(registryEntry, normalized);
+  } catch {
+    params = {};
+  }
+  const children = [];
+
+  if (depth < MAX_NESTED_DEPTH) {
+    try {
+      if (registryEntry.selector.toLowerCase() === MULTISEND_SELECTOR) {
+        const packed = normalizeBytesToHex(params.transactions);
+        const ops = packed ? decodeMultiSend(packed) : [];
+        for (const op of ops) {
+          const innerHex = normalizeBytesToHex(op.data);
+          if (!innerHex || innerHex.length < 10) continue;
+          const innerBytes = hexPayloadByteLength(innerHex);
+          if (nextBudget + innerBytes > MAX_NESTED_BYTES) {
+            attachNestedChild(children, { dropped: true });
+            continue;
+          }
+          attachNestedChild(
+            children,
+            decodeNested(innerHex, depth + 1, nextBudget),
+          );
+        }
+      } else {
+        for (const input of registryEntry.inputs) {
+          if (input.type === 'bytes[]') {
+            const arr = params[input.name] ?? [];
+            for (const item of arr) {
+              const childHex = normalizeBytesToHex(item);
+              if (!childHex || childHex.length < 10) continue;
+              const childBytes = hexPayloadByteLength(childHex);
+              if (nextBudget + childBytes > MAX_NESTED_BYTES) {
+                attachNestedChild(children, { dropped: true });
+                continue;
+              }
+              attachNestedChild(
+                children,
+                decodeNested(childHex, depth + 1, nextBudget),
+              );
+            }
+          } else if (input.type === 'bytes' && shouldRecurseBytesField(registryEntry, input.name)) {
+            const childHex = normalizeBytesToHex(params[input.name]);
+            if (!childHex || childHex.length < 10) continue;
+            const childBytes = hexPayloadByteLength(childHex);
+            if (nextBudget + childBytes > MAX_NESTED_BYTES) {
+              attachNestedChild(children, { dropped: true });
+              continue;
+            }
+            attachNestedChild(
+              children,
+              decodeNested(childHex, depth + 1, nextBudget),
+            );
+          }
+        }
+      }
+    } catch {
+      // Malformed nested payload — leave children empty
+    }
+  } else if (registryEntry.selector.toLowerCase() === MULTISEND_SELECTOR) {
+    const packed = normalizeBytesToHex(params.transactions);
+    const ops = packed ? decodeMultiSend(packed) : [];
+    for (const op of ops) {
+      const innerHex = normalizeBytesToHex(op.data);
+      if (innerHex && innerHex.length >= 10) {
+        attachNestedChild(children, { dropped: true });
+      }
+    }
+  } else {
+    // At max depth: flag nested calldata that was not expanded
+    for (const input of registryEntry.inputs) {
+      const hasNested =
+        input.type === 'bytes[]'
+          ? (params[input.name] ?? []).some(v => normalizeBytesToHex(v)?.length >= 10)
+          : input.type === 'bytes' && shouldRecurseBytesField(registryEntry, input.name)
+            ? (normalizeBytesToHex(params[input.name])?.length ?? 0) >= 10
+            : false;
+      if (hasNested) {
+        attachNestedChild(children, { dropped: true });
+        break;
+      }
+    }
+  }
+
+  params.children = children;
+  return { registryEntry, params };
+}
+
+async function summarizeChildren(chain, children, tx) {
+  const parts = [];
+  for (const child of children ?? []) {
+    if (child.dropped) {
+      parts.push('+1 deeper call not expanded');
+      continue;
+    }
+    if (child.registryEntry) {
+      parts.push(await buildSummary(chain, child.registryEntry, child.params, tx));
+    } else if (child.selector) {
+      parts.push(`unknown selector ${child.selector}`);
+    }
+  }
+  return parts;
 }
 
 /**
@@ -258,6 +419,51 @@ async function buildSummary(chain, registryEntry, params, tx) {
     if (fn === 'execute' && protocol === 'Uniswap Universal Router') {
       return `Multi-command swap via Uniswap Universal Router`;
     }
+
+    // ── Governor propose ──────────────────────────────────────────────────────
+    if (fn === 'propose' && (protocol === 'GovernorBravo' || protocol === 'OZ Governor')) {
+      const targets = params.targets ?? [];
+      const inner   = await summarizeChildren(chain, params.children, tx);
+      const n       = targets.length || inner.length;
+      const detail  = inner.length ? inner.join('; ') : 'no inner calls expanded';
+      return `Proposed governance action with ${n} targets: ${detail}`;
+    }
+
+    // ── Governor / Timelock batch ops ─────────────────────────────────────────
+    if (
+      (fn === 'execute' || fn === 'executeBatch' || fn === 'schedule' || fn === 'scheduleBatch')
+      && (protocol === 'GovernorBravo' || protocol === 'OZ Governor' || protocol === 'OZ Timelock')
+    ) {
+      const batchTargets = params.targets ?? (params.target ? [params.target] : []);
+      const n = batchTargets.length || (params.children?.length ?? 0);
+      const verb = fn.startsWith('schedule') ? 'Scheduled' : 'Executed';
+      const inner = await summarizeChildren(chain, params.children, tx);
+      const detail = inner.length ? inner.join('; ') : `${n}-call batch`;
+      return `${verb} ${n}-call batch: ${detail}`;
+    }
+
+    // ── Safe execTransaction ───────────────────────────────────────────────────
+    if (fn === 'execTransaction' && protocol === 'Safe') {
+      const inner = await summarizeChildren(chain, params.children, tx);
+      const innerSummary = inner[0] ?? 'opaque call';
+      return `Safe exec → ${params.to}: ${innerSummary}`;
+    }
+
+    // ── Gnosis MultiSend ──────────────────────────────────────────────────────
+    if (fn === 'multiSend' && protocol === 'Gnosis MultiSend') {
+      const packed = normalizeBytesToHex(params.transactions);
+      let ops = [];
+      try {
+        ops = packed ? decodeMultiSend(packed) : [];
+      } catch {
+        ops = [];
+      }
+      const inner = await summarizeChildren(chain, params.children, tx);
+      const detail = inner.length
+        ? inner.join('; ')
+        : ops.map(o => `→ ${o.to}`).join('; ');
+      return `MultiSend ${ops.length} inner calls: ${detail}`;
+    }
   } catch {
     // Summary build failed — fall through to generic
   }
@@ -289,6 +495,25 @@ function pickSolanaTo(tx) {
  * @param {string} txHash   - 0x-prefixed transaction hash
  * @returns {Promise<DecodedTransaction>}
  */
+/**
+ * Decode calldata with nested children (exported for tests).
+ */
+export function decodeNestedCalldata(calldata, depth = 0, byteBudget = 0) {
+  return decodeNested(calldata, depth, byteBudget);
+}
+
+/**
+ * Build summary string from calldata without fetching a tx (exported for tests).
+ */
+export async function summarizeCalldata(chain, calldata, tx = null) {
+  const nested = decodeNested(calldata, 0, 0);
+  if (!nested.registryEntry) {
+    const selector = calldata?.slice(0, 10) ?? '0x';
+    return `Contract call with unknown selector ${selector}`;
+  }
+  return buildSummary(chain, nested.registryEntry, nested.params, tx);
+}
+
 export async function decodeTransaction(chain, txHash) {
   const adapter = getChainAdapter(chain);
   if (!adapter) {
@@ -424,7 +649,8 @@ export async function decodeTransaction(chain, txHash) {
     const ethAmt = value;
     summary = `Transferred ${ethAmt} ${nativeSymbol} to ${tx?.to ?? 'unknown'}`;
   } else if (registryEntry) {
-    decodedParams = decodeCalldata(registryEntry, calldata);
+    const nested = decodeNested(calldata, 0, 0);
+    decodedParams = nested.params;
     summary = await buildSummary(chain, registryEntry, decodedParams, tx);
   } else {
     // Unknown selector

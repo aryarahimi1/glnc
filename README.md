@@ -27,7 +27,7 @@ glnc gas                                  ← live gas across 9 chains
 | **ENS resolution** | `vitalik.eth` just works. Reverse lookup annotates addresses too |
 | **Multi-wallet** | Pass multiple addresses; get per-wallet tables + portfolio grand total |
 | **Watch mode** | Re-polls on an interval, shows `+0.5 ETH` / `−100 USDC` deltas in place. Uses the terminal's alternate screen so your scrollback is preserved |
-| **Transaction decoder** | Decodes calldata (Uniswap V2/V3, ERC-20, WETH) + token movements from receipt logs |
+| **Transaction decoder** | Decodes calldata (Uniswap V2/V3, ERC-20, WETH, Governor/Timelock, Safe, MultiSend) + token movements from receipt logs |
 | **DeFi positions** | Aave V3 health factor, Uniswap V3 LP NFTs — via `--positions` |
 | **NFT holdings** | Top NFT collections per chain via Reservoir — via `--nfts` |
 | **Gas tracker** | Live gas across 9 chains (`gas --watch`) — EVM fee tiers + BTC mempool + Solana priority fees |
@@ -241,6 +241,13 @@ written to `~/.glnc/snapshots.json` on each cycle and persist across runs.
 Deltas appear in green (`+`) or red (`−`).
 
 ### Decode a transaction
+
+Calldata decoding covers ERC-20, WETH, Uniswap V2/V3/Universal Router, plus nested governance and treasury calls:
+
+- **GovernorBravo** / **OZ Governor** — `propose`, `queue`, `execute`
+- **OZ Timelock** — `schedule`, `scheduleBatch`, `execute`, `executeBatch`
+- **Safe** — `execTransaction` (inner `data` only; signatures are not treated as calldata)
+- **Gnosis MultiSend** — packed `multiSend` byte-walker with depth-2 recursion
 
 ```
 $ glnc tx 0x02d15281c5514a447192cc8d6140216050f8d3bf92efccd420b635274764fb94
@@ -618,7 +625,8 @@ glnc/
       theme.js              # all ANSI color/style definitions; --no-color / NO_COLOR
       interactive.js        # interactive REPL
     decoders/
-      index.js              # transaction decoder
+      index.js              # transaction decoder (nested calldata)
+      multisend.js          # Gnosis MultiSend packed-byte walker
       events.js             # receipt log decoder (Transfer, Approval, Swap events)
       registry.js           # function selector + known contract registry
     resolvers/
