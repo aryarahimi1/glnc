@@ -367,7 +367,13 @@ export async function runAlert(address, opts) {
     verbose = false,
     dryRun = false,
     json = false,
+    ndjson = false,
   } = opts;
+  // Treat --json and --ndjson as the same machine-mode signal. The CLI already
+  // sets both for --ndjson; the interactive REPL now does too. Previously this
+  // function dropped ndjson on the floor, so ndjson-only callers got pretty
+  // output silently.
+  const machine = json || ndjson;
 
   // Warn if rpc is provided — not yet plumbed into adapters
   if (rpc) {
@@ -381,7 +387,7 @@ export async function runAlert(address, opts) {
   try {
     parsedCondition = parseCondition(condition);
   } catch (err) {
-    if (json) {
+    if (machine) {
       emitNDJSON(wrapError(SCHEMA.ALERT, err.message, { code: 'parse-error' }));
     } else {
       process.stderr.write(c.red('Error:') + ` ${err.message}\n`);
@@ -392,13 +398,13 @@ export async function runAlert(address, opts) {
 
   let pollIndex = 0;
   const iterOpts = () => ({
-    condition, webhook, chain, verbose, dryRun, rpc, json, parsedCondition,
+    condition, webhook, chain, verbose, dryRun, rpc, json: machine, parsedCondition,
     pollIndex: pollIndex++,
   });
 
   if (once) {
     const { exitCode } = await runIteration(address, iterOpts()).catch(err => {
-      if (json) {
+      if (machine) {
         emitNDJSON(wrapEvent(SCHEMA.ALERT, 'error', {
           ok: false,
           error: { code: 'fatal', message: err?.message ?? String(err) },
@@ -423,7 +429,7 @@ export async function runAlert(address, opts) {
         await runIteration(address, iterOpts());
       } catch (err) {
         // Never crash the loop
-        if (json) {
+        if (machine) {
           emitNDJSON(wrapEvent(SCHEMA.ALERT, 'error', {
             ok: false,
             error: { code: 'iteration-error', message: err?.message ?? String(err) },
@@ -443,7 +449,7 @@ export async function runAlert(address, opts) {
     }
   } finally {
     process.removeListener('SIGINT', sigintHandler);
-    if (json) {
+    if (machine) {
       emitNDJSON(wrapEvent(SCHEMA.ALERT, 'stop', {
         reason: 'sigint',
         poll: pollIndex,

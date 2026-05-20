@@ -774,13 +774,18 @@ export async function runWatch(addresses, chainFilter, opts = {}) {
     }
   };
 
-  // Handle SIGINT cleanly — exit alt-screen so the user's scrollback is
-  // restored before we surrender the foreground.
-  const sigintHandler = () => {
+  // Handle SIGINT/SIGTERM/SIGHUP cleanly — exit alt-screen so the user's
+  // scrollback is restored before we surrender the foreground. SIGTERM and
+  // SIGHUP must be covered too: parent-killed (`kill <pid>`) or terminal-
+  // closed sessions would otherwise leave the alt-screen escape un-undone
+  // and the listener leaked.
+  const stopHandler = () => {
     stopped = true;
     exitAltScreen();
   };
-  process.on('SIGINT', sigintHandler);
+  process.on('SIGINT',  stopHandler);
+  process.on('SIGTERM', stopHandler);
+  process.on('SIGHUP',  stopHandler);
 
   let lastRefreshMs = null;
   let prevPollData = null;
@@ -933,11 +938,13 @@ export async function runWatch(addresses, chainFilter, opts = {}) {
       }
     }
   } finally {
-    process.removeListener('SIGINT', sigintHandler);
+    process.removeListener('SIGINT',  stopHandler);
+    process.removeListener('SIGTERM', stopHandler);
+    process.removeListener('SIGHUP',  stopHandler);
     exitAltScreen();
     if (json) {
       emitNDJSON(wrapEvent(SCHEMA.BALANCE_WATCH, 'stop', {
-        reason: 'sigint',
+        reason: 'signal',
         poll: pollIndex,
       }));
     } else {
@@ -1391,8 +1398,10 @@ export async function runGasWatch(chainFilter, opts = {}) {
   };
 
   let stopped = false;
-  const sigintHandler = () => { stopped = true; exitAltScreen(); };
-  process.on('SIGINT', sigintHandler);
+  const stopHandler = () => { stopped = true; exitAltScreen(); };
+  process.on('SIGINT',  stopHandler);
+  process.on('SIGTERM', stopHandler);
+  process.on('SIGHUP',  stopHandler);
 
   let lastRefreshMs = null;
   let pollIndex = 0;
@@ -1469,11 +1478,13 @@ export async function runGasWatch(chainFilter, opts = {}) {
       }
     }
   } finally {
-    process.removeListener('SIGINT', sigintHandler);
+    process.removeListener('SIGINT',  stopHandler);
+    process.removeListener('SIGTERM', stopHandler);
+    process.removeListener('SIGHUP',  stopHandler);
     exitAltScreen();
     if (json) {
       emitNDJSON(wrapEvent(SCHEMA.GAS_WATCH, 'stop', {
-        reason: 'sigint',
+        reason: 'signal',
         poll: pollIndex,
       }));
     } else {

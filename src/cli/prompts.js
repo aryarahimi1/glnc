@@ -37,14 +37,22 @@ export class CancelledError extends Error {
 }
 
 /**
- * Parse a raw stdin chunk into discrete logical keys.
- * Each entry in the returned array is one of:
+ * Parse a raw stdin chunk into discrete logical keys plus any trailing
+ * partial escape sequence that should be carried into the next chunk.
+ *
+ * Each entry in `keys` is one of:
  *   { type: 'up' | 'down' | 'left' | 'right' | 'enter' | 'backspace'
- *           | 'ctrl-c' | 'ctrl-d' | 'esc' | 'char',
+ *           | 'tab' | 'ctrl-c' | 'ctrl-d' | 'esc' | 'char',
  *     value?: string }
  *
+ * `remainder` is a string of bytes the caller MUST prepend to the next chunk
+ * before parsing again. This is what makes split-chunk escape sequences
+ * (a real hazard over SSH/PTY where ESC arrives in one read and `[A` in the
+ * next) safe — without it, a lone ESC at the chunk tail would fire a spurious
+ * cancel and the trailing `[A` would leak into the input buffer as text.
+ *
  * @param {string} data
- * @returns {Array<{type: string, value?: string}>}
+ * @returns {{ keys: Array<{type: string, value?: string}>, remainder: string }}
  */
 export function parseKeys(data) {
   const keys = [];
@@ -55,33 +63,150 @@ export function parseKeys(data) {
 
     if (code === 0x03)      { keys.push({ type: 'ctrl-c' }); i++; continue; }
     if (code === 0x04)      { keys.push({ type: 'ctrl-d' }); i++; continue; }
+    if (code === 0x09)      { keys.push({ type: 'tab' }); i++; continue; }
     if (code === 0x0d || code === 0x0a) { keys.push({ type: 'enter' }); i++; continue; }
     if (code === 0x7f || code === 0x08) { keys.push({ type: 'backspace' }); i++; continue; }
 
-    // CSI escape sequence: ESC [ <letter or final byte>
     if (code === 0x1b) {
-      if (data[i + 1] === '[') {
+      // A bare ESC at the very end of a chunk is ambiguous — it might be a
+      // standalone Esc keypress or the prefix of a CSI/SS3 sequence whose
+      // tail is in the next chunk. Buffer it and let the caller decide.
+      if (i === data.length - 1) {
+        return { keys, remainder: '\x1b' };
+      }
+
+      const next = data[i + 1];
+
+      // SS3 sequence: ESC O <final>  (some terminals send F1-F4 / arrows this way)
+      if (next === 'O') {
+        if (i + 2 >= data.length) {
+          return { keys, remainder: data.slice(i) };
+        }
         const final = data[i + 2];
         if      (final === 'A') keys.push({ type: 'up' });
         else if (final === 'B') keys.push({ type: 'down' });
         else if (final === 'C') keys.push({ type: 'right' });
         else if (final === 'D') keys.push({ type: 'left' });
-        // unknown CSI sequence: skip silently
         i += 3;
         continue;
       }
+
+      // CSI sequence: ESC [ <params> <final>
+      // Final byte is in the range 0x40–0x7E. We seek forward to find it; if
+      // we never do (chunk truncated mid-sequence), buffer everything from
+      // the ESC onward as remainder.
+      if (next === '[') {
+        let j = i + 2;
+        while (j < data.length) {
+          const fc = data.charCodeAt(j);
+          if (fc >= 0x40 && fc <= 0x7e) break;
+          j++;
+        }
+        if (j >= data.length) {
+          return { keys, remainder: data.slice(i) };
+        }
+
+        const final = data[j];
+        const params = data.slice(i + 2, j);
+
+        // Plain arrows + a few common keys. Modifier-laden variants
+        // (e.g. `1;5C` for Ctrl+Right) are recognized as their base key —
+        // the modifier digits are silently discarded but no longer leak.
+        if      (final === 'A') keys.push({ type: 'up' });
+        else if (final === 'B') keys.push({ type: 'down' });
+        else if (final === 'C') keys.push({ type: 'right' });
+        else if (final === 'D') keys.push({ type: 'left' });
+        else if (final === 'H') keys.push({ type: 'home' });
+        else if (final === 'F') keys.push({ type: 'end' });
+        else if (final === '~') {
+          // ESC [ N ~  — Home (1), Ins (2), Del (3), End (4), PgUp (5), PgDn (6), …
+          if      (params === '1' || params === '7') keys.push({ type: 'home' });
+          else if (params === '3') keys.push({ type: 'delete' });
+          else if (params === '4' || params === '8') keys.push({ type: 'end' });
+          else if (params === '5') keys.push({ type: 'pageup' });
+          else if (params === '6') keys.push({ type: 'pagedown' });
+          // other tilde sequences: silently dropped
+        }
+        // any other CSI final byte: silently dropped (no leak)
+
+        i = j + 1;
+        continue;
+      }
+
+      // ESC followed by some other byte — treat as bare Esc and let the
+      // following byte be reprocessed on the next iteration.
       keys.push({ type: 'esc' });
       i++;
       continue;
     }
 
-    // Skip other control bytes
+    // Skip other control bytes (Ctrl+letter we don't handle, etc.)
     if (code < 32) { i++; continue; }
 
     keys.push({ type: 'char', value: ch });
     i++;
   }
-  return keys;
+  return { keys, remainder: '' };
+}
+
+/**
+ * Stateful wrapper around parseKeys that buffers partial escape sequences
+ * across multiple stdin data events and disambiguates a lone ESC keypress
+ * from the prefix of a sequence whose tail is still on the wire.
+ *
+ * Usage:
+ *   const reader = createKeyReader();
+ *   stdin.on('data', buf => reader.feed(buf.toString(), keys => { ... }));
+ *   // on teardown:
+ *   reader.dispose();
+ *
+ * If a chunk ends with a bare ESC, the reader holds it for `escTimeoutMs`
+ * and only emits `{ type: 'esc' }` if no continuation byte arrives. This is
+ * how every serious TUI (readline, ncurses, prompt-toolkit) handles the
+ * Esc/CSI ambiguity.
+ *
+ * @param {{ escTimeoutMs?: number }} [opts]
+ */
+export function createKeyReader(opts = {}) {
+  const escTimeoutMs = opts.escTimeoutMs ?? 50;
+  let pending = '';
+  let pendingTimer = null;
+  let lastEmit = null;
+
+  const clearPendingTimer = () => {
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+  };
+
+  return {
+    feed(data, onKeys) {
+      lastEmit = onKeys;
+      clearPendingTimer();
+
+      const combined = pending + data;
+      const { keys, remainder } = parseKeys(combined);
+      pending = remainder;
+
+      if (keys.length) onKeys(keys);
+
+      // If we're left holding a lone ESC, arm a short timeout to flush it
+      // as a real Esc keypress. Any new bytes within the window cancel the
+      // timer and re-parse with the buffered ESC prepended.
+      if (pending === '\x1b') {
+        pendingTimer = setTimeout(() => {
+          pendingTimer = null;
+          if (pending === '\x1b' && lastEmit) {
+            pending = '';
+            lastEmit([{ type: 'esc' }]);
+          }
+        }, escTimeoutMs);
+      }
+    },
+    dispose() {
+      clearPendingTimer();
+      pending = '';
+      lastEmit = null;
+    },
+  };
 }
 
 function ensureTTY() {
@@ -213,7 +338,9 @@ export async function select({ message, hint, choices, initial = 0 }) {
   renderChoices(true);
 
   return new Promise((resolve, reject) => {
+    const reader = createKeyReader();
     const finish = (resolveFn, value) => {
+      reader.dispose();
       stdin.setRawMode(false);
       stdin.removeListener('data', onData);
       stdin.pause();
@@ -221,8 +348,7 @@ export async function select({ message, hint, choices, initial = 0 }) {
       resolveFn(value);
     };
 
-    const onData = (buf) => {
-      const keys = parseKeys(buf.toString());
+    const handleKeys = (keys) => {
       for (const key of keys) {
         if (key.type === 'ctrl-c' || key.type === 'ctrl-d' || key.type === 'esc') {
           return finish(reject, new CancelledError());
@@ -237,6 +363,16 @@ export async function select({ message, hint, choices, initial = 0 }) {
           renderChoices(false);
           continue;
         }
+        if (key.type === 'home') {
+          index = 0;
+          renderChoices(false);
+          continue;
+        }
+        if (key.type === 'end') {
+          index = choices.length - 1;
+          renderChoices(false);
+          continue;
+        }
         if (key.type === 'enter') {
           return finish(resolve, choices[index].value);
         }
@@ -246,15 +382,20 @@ export async function select({ message, hint, choices, initial = 0 }) {
             index = quitChoiceIdx;
             return finish(resolve, choices[quitChoiceIdx].value);
           }
+          // Digit jumps the cursor to that row but does NOT auto-submit —
+          // a fat-finger on a destructive prompt (skip-dry-run, send-webhook)
+          // should never resolve without an explicit Enter.
           const n = parseInt(key.value, 10);
           if (!isNaN(n) && n >= 1 && n <= choices.length) {
             index = n - 1;
             renderChoices(false);
-            return finish(resolve, choices[index].value);
+            continue;
           }
         }
       }
     };
+
+    const onData = (buf) => reader.feed(buf.toString(), handleKeys);
 
     stdin.setRawMode(true);
     stdin.resume();
@@ -293,10 +434,8 @@ export async function input({
   let buffer = initial;
   let errorMsg = '';
 
-  const defaultHint = required
-    ? (acceptPlaceholder && placeholder
-        ? 'Enter for placeholder · Esc cancel'
-        : 'Enter to submit · Esc cancel')
+  const defaultHint = (acceptPlaceholder && placeholder)
+    ? 'Type a value · Tab for default · Esc cancel'
     : 'Enter to submit · Esc cancel';
   const hintText = hint ?? defaultHint;
 
@@ -341,7 +480,9 @@ export async function input({
   };
 
   return new Promise((resolve, reject) => {
+    const reader = createKeyReader();
     const finish = (fn, value) => {
+      reader.dispose();
       clearErrorLine();
       stdin.setRawMode(false);
       stdin.removeListener('data', onData);
@@ -350,8 +491,7 @@ export async function input({
       fn(value);
     };
 
-    const onData = (buf) => {
-      const keys = parseKeys(buf.toString());
+    const handleKeys = (keys) => {
       let dirty = false;
 
       for (const key of keys) {
@@ -362,15 +502,30 @@ export async function input({
           return finish(reject, new CancelledError());
         }
         if (key.type === 'enter') {
-          if (buffer.length === 0 && acceptPlaceholder && placeholder) {
-            return finish(resolve, placeholder);
-          }
+          // `required` always wins. If the buffer is empty, never auto-submit
+          // the placeholder for a required field — the user must explicitly
+          // type a value (or accept the placeholder by pressing Tab below).
           if (required && buffer.trim().length === 0) {
-            errorMsg = 'value required — type something or press Esc to cancel';
+            errorMsg = 'value required — type something, Tab for placeholder, or Esc to cancel';
             dirty = true;
             continue;
           }
+          if (buffer.length === 0 && acceptPlaceholder && placeholder) {
+            return finish(resolve, placeholder);
+          }
           return finish(resolve, buffer);
+        }
+
+        if (key.type === 'tab') {
+          // Tab fills the buffer with the placeholder (still editable, still
+          // submitted via Enter). Provides an explicit opt-in to use the
+          // suggested default without the dangerous bare-Enter shortcut.
+          if (buffer.length === 0 && placeholder) {
+            buffer = placeholder;
+            errorMsg = '';
+            dirty = true;
+          }
+          continue;
         }
 
         if (key.type === 'backspace') {
@@ -392,6 +547,8 @@ export async function input({
 
       if (dirty) render();
     };
+
+    const onData = (buf) => reader.feed(buf.toString(), handleKeys);
 
     stdin.setRawMode(true);
     stdin.resume();

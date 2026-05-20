@@ -154,10 +154,13 @@ function printSeparator() {
 
 /**
  * Map a session output mode ('pretty' | 'json' | 'ndjson') to the option
- * flags expected by the run* functions.
+ * flags expected by the run* functions. Mirrors the CLI: --ndjson sets both
+ * json and ndjson so run* functions that gate on either flag stay consistent.
  */
-function outputOpts(mode) {
-  return mode === 'pretty' ? {} : { json: true };
+export function outputOpts(mode) {
+  if (mode === 'pretty') return {};
+  if (mode === 'ndjson') return { json: true, ndjson: true };
+  return { json: true };
 }
 
 async function balanceFlow(session) {
