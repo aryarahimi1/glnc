@@ -53,14 +53,14 @@ Adds the official tap and installs a prebuilt binary. No Bun, no Node, no depend
 ### Install script (curl)
 
 ```sh
-curl -fsSL https://aryarahimi1.github.io/glnc/install.sh | bash
+curl -fsSL https://glnc.dev/install.sh | bash
 ```
 
 Downloads the binary for your platform, verifies its SHA256 against the release manifest, and installs it to `~/.local/bin` or `/usr/local/bin`.
 
 Paranoid? Inspect first:
 ```sh
-curl -fsSL https://aryarahimi1.github.io/glnc/install.sh -o install.sh && less install.sh && bash install.sh
+curl -fsSL https://glnc.dev/install.sh -o install.sh && less install.sh && bash install.sh
 ```
 
 Environment overrides:
