@@ -65,7 +65,9 @@ function escapeField(v) {
   else if (typeof v === 'boolean')  s = v ? 'true' : 'false';
   else                              s = JSON.stringify(v);
 
-  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  const needsFormulaGuard = /^[=+\-@\t\r]/.test(s);
+  if (needsFormulaGuard) s = "'" + s;
+  if (needsFormulaGuard || /[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
   return s;
 }
 
