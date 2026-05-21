@@ -1683,17 +1683,40 @@ ${c.bold('glnc history')} <address> [flags]
   higher rate limits.
 
 ${c.bold('FLAGS')}
-  --chain <name>      single EVM chain (default: all detected)
-  --from <YYYY-MM-DD> start date (inclusive)
-  --to <YYYY-MM-DD>   end date (inclusive)
-  --out <path>        write CSV to file (--out auto for ./glnc-<addr>.csv)
-  --json              emit JSON instead of CSV
-  --no-prices         skip historical USD lookup (faster)
-  --api-key <key>     Etherscan V2 key
+  --chain <name>            single EVM chain (default: all detected)
+  --from <YYYY-MM-DD>       start date (inclusive)
+  --to <YYYY-MM-DD>         end date (inclusive)
+  --out <path>              write CSV to file (--out auto for ./glnc-<addr>.csv)
+  --json                    emit JSON instead of CSV
+  --no-prices               skip historical USD lookup (faster)
+  --cost-basis <fifo|none>  compute realized gains via FIFO lot tracking
+                            (adds cost_basis_usd, proceeds_usd,
+                             realized_gain_usd, holding_period, income_usd)
+  --own-wallets <a,b,c>     EVM addresses to treat as your own wallets;
+                            transfers to/from them do not realize gains
+  --api-key <key>           Etherscan V2 key
 
 ${c.bold('EXAMPLES')}
   glnc history 0xd8dA…6045 --out auto
   glnc history 0x… --from 2025-01-01 --to 2025-12-31 --chain arbitrum --json
+  glnc history 0x… --cost-basis fifo --from 2025-01-01 --to 2025-12-31 --out 8949.csv
+  glnc history 0x… --cost-basis fifo --own-wallets 0xAAA…,0xBBB… --out auto
+
+${c.bold('TAXES')}
+  --cost-basis fifo computes realized capital gains using first-in-first-out
+  lot tracking. Adds cost_basis_usd, proceeds_usd, realized_gain_usd,
+  holding_period, and income_usd columns to the output.
+
+  IMPORTANT — glnc does NOT compute ordinary income from staking rewards,
+  airdrops, hard forks, mining, or lending interest. These are taxable as
+  ordinary income at FMV on receipt (Rev. Rul. 2019-24, 2023-14). glnc
+  records each potential inbound as a zero-cost-basis lot and surfaces the
+  USD value in the income_usd column for you/your CPA to classify and
+  report on Schedule 1.
+
+  glnc is MIT-licensed AS-IS software. It does not constitute tax, legal,
+  or accounting advice. Verify all output with a qualified tax professional
+  before filing. See https://glnc.dev/docs/taxes/ for known limitations.
 `;
 
 const HELP_BY_COMMAND = {

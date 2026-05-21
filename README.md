@@ -322,6 +322,33 @@ Set `GLNC_ETHERSCAN_KEY` once in your shell to avoid passing `--api-key` every
 time. Without a key the public Etherscan V2 endpoint still works, with a lower
 rate limit.
 
+### Cost basis (taxes)
+
+v1.1.0 adds `--cost-basis fifo`, which annotates each disposal in the CSV
+with five new columns at the end: `cost_basis_usd`, `proceeds_usd`,
+`realized_gain_usd`, `holding_period` (short ≤365d / long >365d / mixed),
+and `income_usd` (a candidate Schedule 1 ordinary-income value for inbound
+transfers from non-own wallets — staking, airdrops, forks, mining, interest).
+Pair with `--own-wallets <addrs>` so transfers between addresses you control
+are not treated as disposals. EVM chains only in v1.1.0: ethereum, polygon,
+arbitrum, base, optimism. Incompatible with `--no-prices`.
+
+```sh
+glnc history 0xd8dA... --chain ethereum --cost-basis fifo \
+  --own-wallets 0xA1b2...,0xC3d4... --out 2025.csv
+```
+
+**Disclaimer.** glnc does NOT compute ordinary income from staking, airdrops,
+hard forks, mining, or lending interest — those are taxable at FMV on receipt
+(Rev. Rul. 2019-24, 2023-14) and belong on Schedule 1, not Schedule D. glnc
+records each potential inbound as a zero-cost-basis lot and surfaces the USD
+value in `income_usd` for you or your CPA to classify. glnc is MIT-licensed
+AS-IS software and does not constitute tax, legal, or accounting advice;
+verify all output with a qualified tax professional before filing.
+
+Full handling spec, worked examples, and known limitations:
+**https://glnc.dev/docs/taxes/**
+
 ### Conditional alerts
 
 ```sh

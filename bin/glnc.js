@@ -111,7 +111,10 @@ switch (args.command) {
       out: args.outPath,
       apiKey: args.apiKey,
       noPrices: args.noPrices,
+      costBasis: args.costBasis,
+      ownWallets: args.ownWallets,
       json: args.json,
+      ndjson: args.ndjson,
       verbose: args.verbose,
     });
     break;

@@ -5,13 +5,20 @@
  * comma/quote/CR/LF, double embedded quotes, CRLF line endings. No I/O.
  */
 
-/** Standard column order — exported so other modules can reference it. */
+/** Standard column order — exported so other modules can reference it.
+ *
+ * Cost-basis columns (cost_basis_usd, proceeds_usd, realized_gain_usd,
+ * holding_period) are appended at the end. They are populated only when
+ * --cost-basis fifo is set; otherwise they stay empty so the CSV remains
+ * backward compatible. */
 export const CSV_COLUMNS = [
   'timestamp', 'iso_timestamp', 'chain', 'tx_hash', 'type',
   'token_in', 'amount_in', 'token_out', 'amount_out',
   'usd_value', 'counterparty', 'counterparty_name',
   'fee_native', 'fee_symbol', 'fee_usd',
   'block_number', 'contract', 'method',
+  'cost_basis_usd', 'proceeds_usd', 'realized_gain_usd', 'holding_period',
+  'income_usd',
 ];
 
 const COLUMN_TO_ROW_KEY = {
@@ -33,9 +40,14 @@ const COLUMN_TO_ROW_KEY = {
   block_number:      'blockNumber',
   contract:          'contract',
   method:            'method',
+  cost_basis_usd:    'costBasisUsd',
+  proceeds_usd:      'proceedsUsd',
+  realized_gain_usd: 'realizedGainUsd',
+  holding_period:    'holdingPeriod',
+  income_usd:        'incomeUsd',
 };
 
-const USD_COLUMNS = new Set(['usd_value', 'fee_usd']);
+const USD_COLUMNS = new Set(['usd_value', 'fee_usd', 'cost_basis_usd', 'proceeds_usd', 'realized_gain_usd', 'income_usd']);
 
 // Fixed 4-decimal precision, never scientific. toFixed is exact for the
 // IEEE-754 inputs we'll see in practice.

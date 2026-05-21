@@ -101,6 +101,8 @@ export function parseArgs(argv) {
   let apiKey = null;
   let noPrices = false;
   let showUnpriced = false;
+  let costBasis = null;     // null | 'none' | 'fifo' — gates FIFO computation in `history`
+  let ownWallets = [];      // string[] — addresses to treat as own for transfer detection
   let helpRequested = false;
 
   // Extract flags anywhere in argv; non-flag tokens go into filtered
@@ -198,6 +200,20 @@ export function parseArgs(argv) {
       noPrices = true;
     } else if (arg === '--show-unpriced') {
       showUnpriced = true;
+    } else if (arg.startsWith('--cost-basis=')) {
+      costBasis = arg.slice('--cost-basis='.length).toLowerCase();
+    } else if (arg === '--cost-basis') {
+      if (i + 1 >= argv.length) {
+        throw new ParseError('--cost-basis requires a value (fifo|none)');
+      }
+      costBasis = argv[++i].toLowerCase();
+    } else if (arg.startsWith('--own-wallets=')) {
+      ownWallets = arg.slice('--own-wallets='.length).split(',').map(a => a.trim()).filter(Boolean);
+    } else if (arg === '--own-wallets') {
+      if (i + 1 >= argv.length) {
+        throw new ParseError('--own-wallets requires a comma-separated list of addresses');
+      }
+      ownWallets = argv[++i].split(',').map(a => a.trim()).filter(Boolean);
     } else if (arg === '--help' || arg === '-h') {
       helpRequested = true;
     } else {
@@ -217,12 +233,36 @@ export function parseArgs(argv) {
   const isAlertCmd = first === 'alert';
   const interval = intervalRaw ?? (isAlertCmd ? 120 : 15);
 
+  // Validate --cost-basis early so we fail loudly on typos instead of silently no-op'ing.
+  if (costBasis !== null && costBasis !== 'fifo' && costBasis !== 'none') {
+    throw new ParseError(
+      `--cost-basis must be "fifo" or "none" (got: ${JSON.stringify(costBasis)})`
+    );
+  }
+
+  // Blocker 6: FIFO requires USD prices; reject the combination at parse time.
+  if (costBasis === 'fifo' && noPrices) {
+    throw new ParseError(
+      '--cost-basis fifo requires USD prices; cannot be combined with --no-prices'
+    );
+  }
+
+  // Validate --own-wallets address format. Empty list is fine.
+  for (const a of ownWallets) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(a)) {
+      throw new ParseError(
+        `--own-wallets entry "${a}" is not a valid EVM address (0x + 40 hex chars)`
+      );
+    }
+  }
+
   // Shared flags carried by every parsed result, regardless of subcommand.
   const flagBase = {
     chain, json, ndjson, strict, schemaInfo,
     verbose, watch, interval, positions, nfts,
     condition, webhook, once, dryRun, rpc,
     fromDate, toDate, outPath, apiKey, noPrices, showUnpriced,
+    costBasis, ownWallets,
     raw,
   };
 

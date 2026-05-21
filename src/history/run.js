@@ -140,13 +140,14 @@ export async function runHistory(addressInput, opts = {}) {
   // ── Lazy-load history modules ─────────────────────────────────────────────
   // These are written by a parallel agent — the imports happen at call time
   // so a missing module surfaces as a clean error here, not at process start.
-  let etherscan, classifier, prices, csv;
+  let etherscan, classifier, prices, csv, costBasisMod;
   try {
-    [etherscan, classifier, prices, csv] = await Promise.all([
+    [etherscan, classifier, prices, csv, costBasisMod] = await Promise.all([
       import('./etherscan.js'),
       import('./classifier.js'),
       import('./prices_history.js'),
       import('./csv.js'),
+      import('./cost_basis.js'),
     ]);
   } catch (err) {
     emitErr(
@@ -264,6 +265,78 @@ export async function runHistory(addressInput, opts = {}) {
         r.feeUsd = feePrice != null && !isNaN(feeAmt) ? feePrice * feeAmt : null;
       } else {
         r.feeUsd = null;
+      }
+    }
+  }
+
+  // ── Compute cost basis (FIFO) ─────────────────────────────────────────────
+  // Only when --cost-basis fifo is set. Mutates rows in place adding
+  // costBasisUsd / proceedsUsd / realizedGainUsd / holdingPeriod fields.
+  const costBasisMethod = opts.costBasis ?? null;
+  if (costBasisMethod === 'fifo') {
+    // Note: --cost-basis fifo with --no-prices is rejected at parse time (args.js).
+    // Blocker 5: single-chain warning when --chain was not passed explicitly.
+    // opts.chain is null when the user did not specify --chain (run.js coerces
+    // it to 'ethereum' for the API calls, but the raw opts.chain is still null).
+    if (!json && opts.chain === null) {
+      process.stderr.write(c.dim(
+        '  FIFO computed against ethereum only.\n' +
+        '  For multi-chain wallets, re-run per chain (--chain polygon, etc.) and combine CSVs.\n'
+      ));
+    }
+
+    // Blocker 7: wrap computeCostBasis so one bad row never kills the export.
+    let cbWarnings = [];
+    try {
+      const result = costBasisMod.computeCostBasis(rows, {
+        method: 'fifo',
+        ownWallets: opts.ownWallets ?? [],
+      });
+      cbWarnings = result.warnings;
+    } catch (err) {
+      warnings.push(`cost basis annotation failed: ${err?.message ?? err}`);
+      if (!json) {
+        process.stderr.write(c.dim(
+          '  cost basis annotation failed; CSV will not include FIFO columns\n'
+        ));
+      }
+    }
+    for (const w of cbWarnings) warnings.push(w);
+
+    if (!json) {
+      process.stderr.write(c.dim(
+        `  cost basis (FIFO): annotated ${rows.filter(r => r.realizedGainUsd != null).length} disposal(s)\n`
+      ));
+
+      // Blocker 1: ordinary income summary for non-own-wallet inbound transfers.
+      const ownWalletsLower = new Set(
+        (opts.ownWallets ?? []).map(a => a.toLowerCase())
+      );
+      const incomeRows = rows.filter(r =>
+        (r.type === 'transfer-in' || r.type === 'native-transfer-in') &&
+        !ownWalletsLower.has((r.counterparty ?? '').toLowerCase()) &&
+        r.usdValue != null && Number.isFinite(r.usdValue)
+      );
+      if (incomeRows.length > 0) {
+        const totalIncome = incomeRows.reduce((sum, r) => sum + r.usdValue, 0);
+        const fmt = n => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        process.stderr.write(c.dim(
+          `  ordinary income (inbound transfers from non-own wallets): $${fmt(totalIncome)} across ${incomeRows.length} receipt(s)\n` +
+          `  → report applicable amounts on Schedule 1; glnc does not classify gift vs reward\n`
+        ));
+      }
+
+      // Blocker 4: outbound transfer disposal warning.
+      const outboundDisposalCount = rows.filter(r =>
+        (r.type === 'transfer-out' || r.type === 'native-transfer-out') &&
+        !ownWalletsLower.has((r.counterparty ?? '').toLowerCase())
+      ).length;
+      if (outboundDisposalCount > 0) {
+        process.stderr.write(c.dim(
+          `  WARNING: ${outboundDisposalCount} outbound transfer(s) treated as taxable disposals.\n` +
+          `  If any went to your other wallets or exchange-deposit addresses,\n` +
+          `  re-run with --own-wallets 0xA,0xB,... to avoid over-reporting gains.\n`
+        ));
       }
     }
   }
