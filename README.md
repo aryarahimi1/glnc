@@ -121,6 +121,21 @@ Per-command help is the canonical reference — `glnc balance --help`,
 
 ---
 
+## Documentation
+
+Full docs live at **[glnc.dev](https://glnc.dev/)**. Common entry points:
+
+| | |
+|---|---|
+| Chain notes | [Ethereum: chain-specific usage notes](https://glnc.dev/chains/ethereum/) |
+| `tx` command | [Decode a transaction from the terminal](https://glnc.dev/docs/tx/) |
+| `history` CSV | [Export transaction history for taxes](https://glnc.dev/docs/taxes/) |
+| Comparison | [glnc vs cast (Foundry)](https://glnc.dev/compare/glnc-vs-cast/) |
+| Comparison | [glnc vs Etherscan](https://glnc.dev/compare/glnc-vs-etherscan/) |
+| Maintainer | [About the maintainer](https://glnc.dev/about/) |
+
+---
+
 ## Chain support matrix
 
 `balance` works on **9 chains** — 7 EVM L1/L2s plus Solana and Bitcoin. `tx`
@@ -347,7 +362,7 @@ AS-IS software and does not constitute tax, legal, or accounting advice;
 verify all output with a qualified tax professional before filing.
 
 Full handling spec, worked examples, and known limitations:
-**https://glnc.dev/docs/taxes/**
+**[Export transaction history for taxes](https://glnc.dev/docs/taxes/)**
 
 ### Conditional alerts
 
