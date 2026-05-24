@@ -99,17 +99,17 @@ export async function getAllBalances(address) {
   const type = detectAddressType(address);
 
   if (type === 'bitcoin') {
-    return [await bitcoin.getBalances(address)];
+    return [await bitcoin.getBalances({ address })];
   }
 
   if (type === 'solana') {
-    return [await solana.getBalances(address)];
+    return [await solana.getBalances({ address })];
   }
 
   if (type === 'evm') {
     // Query all EVM chains concurrently; isolate failures
     const results = await Promise.allSettled(
-      EVM_ADAPTERS.map(adapter => adapter.getBalances(address))
+      EVM_ADAPTERS.map(adapter => adapter.getBalances({ address }))
     );
     return results.map((res, i) => {
       if (res.status === 'fulfilled') return res.value;

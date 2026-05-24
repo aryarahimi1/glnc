@@ -13,6 +13,8 @@ import {
   isAddress,
 } from 'viem';
 
+import { redactUrl, jsonSafeQuorumValue } from '../output/serialize.js';
+
 // ─── Minimal ABI fragments ────────────────────────────────────────────────────
 
 export const ERC20_ABI = [
@@ -104,9 +106,24 @@ const tokenMetaCache = new Map();
 
 /**
  * Build a viem PublicClient for the given RPC URL.
+ *
+ * @param {string} rpcUrl
+ * @param {*} chain         - viem chain object
+ * @param {AbortSignal} [signal] - optional AbortSignal; when provided, viem
+ *   passes it directly to the fetch call so the underlying TCP connection is
+ *   torn down as soon as the signal fires.  Pairing this with keepalive:false
+ *   prevents undici from recycling the socket back into its connection pool,
+ *   which is what would otherwise keep the Node event loop alive after the
+ *   request is logically complete.
  */
-export function makeClient(rpcUrl, chain) {
-  return createPublicClient({ chain, transport: http(rpcUrl, { timeout: 10_000 }) });
+export function makeClient(rpcUrl, chain, signal) {
+  const fetchOptions = signal
+    ? { signal, keepalive: false }
+    : { keepalive: false };
+  return createPublicClient({
+    chain,
+    transport: http(rpcUrl, { timeout: 10_000, fetchOptions }),
+  });
 }
 
 // Maximum number of balanceOf calls per multicall batch.
@@ -243,3 +260,531 @@ export function buildErrorResponse(chainName, message) {
 }
 
 export { formatUnits, getAddress, isAddress };
+
+// ─── RPC Quorum Helper ────────────────────────────────────────────────────────
+
+// Maximum number of RPC URLs queryQuorum will fan out to in parallel.
+// Caps resource usage and prevents pathological caller mistakes.
+export const MAX_QUORUM_FANOUT = 16;
+
+/**
+ * redactUrl + jsonSafeQuorumValue are imported from '../output/serialize.js'.
+ * They are the canonical implementations; keeping local copies risks drift
+ * (e.g. missing BigInt-in-object handling in error serialization).
+ */
+
+/**
+ * Custom error thrown when `mode: 'all'` detects disagreement across RPCs.
+ * Callers can pattern-match on this class to decide how to handle divergence.
+ *
+ * The `values` field is preserved as-is for programmatic inspection, but
+ * `toJSON()` and the error `message` use bounded previews to avoid emitting
+ * megabytes of raw payload when object-shaped values disagree.
+ */
+export class RpcDisagreementError extends Error {
+  /**
+   * @param {object} opts
+   * @param {string} [opts.chain]       - Chain identifier (optional)
+   * @param {string[]} opts.urls        - All queried URLs
+   * @param {Array<{url:string,normalizedKey:string,value:*}>} opts.values - Per-URL results
+   */
+  constructor({ chain, urls, values }) {
+    const previews = values.map((v) => ({
+      url: redactUrl(v.url),
+      normalizedKey: v.normalizedKey,
+      valuePreview: jsonSafeQuorumValue(v.value),
+    }));
+    super(
+      `RPC providers returned disagreeing values across ${urls.length} endpoints: ` +
+        JSON.stringify(previews),
+    );
+    this.name = 'RpcDisagreementError';
+    this.chain = chain ?? null;
+    this.urls = urls;
+    this.values = values;
+  }
+
+  toJSON() {
+    return {
+      chain: this.chain,
+      urls: this.urls.map(redactUrl),
+      valuePreviews: this.values.map((v) => ({
+        url: redactUrl(v.url),
+        normalizedKey: v.normalizedKey,
+        valuePreview: jsonSafeQuorumValue(v.value),
+      })),
+    };
+  }
+}
+
+/**
+ * Query multiple RPC URLs in parallel with a configurable quorum policy.
+ *
+ * IMPORTANT: 429 (rate-limit) backoff is intentionally NOT implemented here.
+ * Backoff belongs at the call-site retry layer, not in this quorum helper.
+ * Providers with aggressive free-tier limits (Ankr, polygon-rpc.com,
+ * mainnet.optimism.io) may need per-adapter retry wrappers around exec.
+ *
+ * SECURITY: mode='any' returns the FIRST successful response without
+ * comparing against other providers. It trusts the fastest responder
+ * and provides no defense against a fast-but-malicious RPC. For
+ * balance/state data, prefer 'majority' or 'all'.
+ *
+ * @template T
+ * @param {object} opts
+ * @param {string[]}                      opts.urls       - RPC URLs to query in parallel
+ * @param {*}                             opts.viemChain  - Viem chain object (e.g. mainnet)
+ * @param {(client: *) => Promise<T>}     opts.exec       - Per-client work; caller controls what viem calls to make
+ * @param {'any'|'majority'|'all'}        [opts.mode]     - Quorum policy. Default 'any'
+ * @param {(value: T) => string|null}     [opts.normalize] - Comparator key generator. Default String(value)
+ * @param {number}                        [opts.timeoutMs] - Per-URL timeout in ms. Default 10_000
+ *
+ * @returns {Promise<{
+ *   value: T,
+ *   source: string,
+ *   sources: Array<{url:string, status:'fulfilled'|'rejected', value?:T, normalizedKey?:string, error?:string}>,
+ *   agreement: 'unanimous'|'majority'|'plurality'|'single',
+ *   disagreements: Array<{url:string, value:T, normalizedKey:string}>,
+ *   mode: 'any'|'majority'|'all',
+ * }>}
+ *
+ * @throws {RpcDisagreementError} Only when mode='all' and successful responses disagree
+ * @throws {Error} When all URLs fail (any mode), when urls.length is out of range,
+ *                 or when the default normalizer collapses an object to "[object Object]"
+ */
+export async function queryQuorum({
+  urls,
+  viemChain,
+  exec,
+  mode = 'any',
+  normalize,
+  timeoutMs = 10_000,
+}) {
+  if (urls.length > MAX_QUORUM_FANOUT || urls.length < 1) {
+    throw new Error(
+      `queryQuorum: urls.length must be between 1 and ${MAX_QUORUM_FANOUT}`,
+    );
+  }
+
+  // Default normalizer: String() coercion handles primitives and BigInts
+  const normalizer = normalize ?? ((v) => String(v));
+
+  /**
+   * Wrap a single exec(client) call with a per-URL timeout.
+   *
+   * An AbortController is created for each URL.  Its signal is forwarded to
+   * the viem http transport (via fetchOptions) so that the underlying TCP/TLS
+   * connection is immediately destroyed when we no longer need the request —
+   * either because our own timeout fired, or because exec() already settled.
+   * Without this, a slow or non-responding RPC leaves an in-flight undici
+   * socket that pins the Node event loop for the duration of the server-side
+   * TCP timeout (tens of seconds), causing the visible CLI hang.
+   *
+   * keepalive:false in makeClient ensures undici does not recycle the socket
+   * back into its connection pool after a cancelled request, which would also
+   * keep the event loop alive.
+   *
+   * @param {string} url
+   * @returns {Promise<{url:string, status:'fulfilled'|'rejected', value?:*, normalizedKey?:string, error?:string}>}
+   */
+  function execWithTimeout(url) {
+    const controller = new AbortController();
+    const client = makeClient(url, viemChain, controller.signal);
+
+    let timerHandle;
+    const timeoutPromise = new Promise((_, reject) => {
+      timerHandle = setTimeout(
+        () => reject(new Error(`timeout after ${timeoutMs}ms querying ${redactUrl(url)}`)),
+        timeoutMs,
+      );
+    });
+
+    return Promise.race([exec(client), timeoutPromise]).then(
+      (value) => {
+        clearTimeout(timerHandle);
+        // Abort cancels any residual in-flight sub-requests (e.g. multicall
+        // chunks that resolved after the race winner) and releases the socket.
+        controller.abort();
+        const normalizedKey = normalizer(value);
+        if (
+          normalizedKey === '[object Object]' &&
+          typeof value === 'object' &&
+          value !== null
+        ) {
+          const err = new Error(
+            'queryQuorum: object value requires explicit normalize() — default String(v) collapses all objects to "[object Object]"',
+          );
+          err.isDeveloperError = true;
+          throw err;
+        }
+        return { url, status: 'fulfilled', value, normalizedKey };
+      },
+      (err) => {
+        clearTimeout(timerHandle);
+        // Abort the underlying fetch so undici tears down the socket immediately
+        // instead of waiting for the server-side TCP timeout (which can be 60+s).
+        controller.abort();
+        if (err && err.isDeveloperError) throw err;
+        return {
+          url,
+          status: 'rejected',
+          error: err?.message ?? String(err),
+        };
+      },
+    );
+  }
+
+  // ── mode: 'any' ─────────────────────────────────────────────────────────────
+  // Sequential first-success: try each URL in order, return on the first
+  // success WITHOUT touching later URLs. This matches the help-text contract
+  // ("first-success, single provider queried") and avoids tripling load on
+  // shared free-tier RPCs by default. majority/all stay parallel below.
+  if (mode === 'any') {
+    /** @type {Array<{url:string,status:'fulfilled'|'rejected',value?:*,normalizedKey?:string,error?:string}>} */
+    const sources = [];
+    const errors = [];
+    let winnerSlot = null;
+
+    for (const url of urls) {
+      const slot = await execWithTimeout(url);
+      sources.push(slot);
+      if (slot.status === 'fulfilled') {
+        winnerSlot = slot;
+        break;
+      }
+      errors.push(`${redactUrl(slot.url)}: ${slot.error ?? 'unknown'}`);
+    }
+
+    if (winnerSlot === null) {
+      throw new Error('all RPC providers failed: ' + errors.join('; '));
+    }
+
+    // Fill in untried URLs (those after the winner) with status:'rejected',
+    // error:'not-tried' so callers can distinguish "we tried and it failed"
+    // from "we never made a request".
+    const triedUrls = new Set(sources.map((s) => s.url));
+    for (const url of urls) {
+      if (!triedUrls.has(url)) {
+        sources.push({ url, status: 'rejected', error: 'not-tried' });
+      }
+    }
+
+    return {
+      value: winnerSlot.value,
+      source: winnerSlot.url,
+      sources,
+      agreement: 'single',
+      disagreements: [],
+      mode: 'any',
+    };
+  }
+
+  // ── mode: 'majority' | 'all' ─────────────────────────────────────────────────
+  //
+  // Early-exit streaming accumulator.
+  //
+  // The naive Promise.allSettled approach forces the caller to wait for every
+  // URL to either respond or hit timeoutMs.  With 3 RPCs where one or two are
+  // slow/broken, that means waiting up to timeoutMs (default 10 s) or longer —
+  // even when the answer is already known from the fast providers.  That is the
+  // root cause of the observed CLI hangs ("data flushed within ~1s but process
+  // hangs 10–60 s before exiting").
+  //
+  // Fix: tag each in-flight promise with its index so we can identify which one
+  // settled via Promise.race, then check early-exit conditions after each
+  // settlement.  When the result is decided, abort every remaining request
+  // immediately so their undici sockets are torn down rather than waiting for
+  // the full TCP timeout to elapse.
+  //
+  // Early-exit rules
+  //   majority — return as soon as ⌈N/2⌉+1 responses agree on one key, OR as
+  //              soon as it becomes mathematically impossible for any key to
+  //              reach that threshold (fall to plurality).
+  //   all      — return when ALL URLs have settled (same as before when they all
+  //              agree), but throw RpcDisagreementError the moment a second
+  //              distinct key is seen (fail-fast on disagreement).
+  //
+  // Remaining (un-settled) URLs are represented in sources as
+  // { status: 'rejected', error: 'aborted' } so callers always receive an
+  // entry for every queried URL.
+
+  const totalUrls = urls.length;
+  const majorityThreshold = Math.floor(totalUrls / 2) + 1;
+
+  // Build one entry per URL.  Exposes an abort() callback so we can cancel both
+  // the internal timer and the undici connection when we decide to stop early.
+  /** @type {Array<{idx:number, url:string, promise:Promise<*>, abort:()=>void}>} */
+  const inflightEntries = urls.map((url, idx) => {
+    const controller = new AbortController();
+    const client = makeClient(url, viemChain, controller.signal);
+
+    let timerHandle;
+    const timeoutPromise = new Promise((_, reject) => {
+      timerHandle = setTimeout(
+        () => reject(new Error(`timeout after ${timeoutMs}ms querying ${redactUrl(url)}`)),
+        timeoutMs,
+      );
+    });
+
+    // This promise ALWAYS fulfills (never rejects): errors become
+    // { status:'rejected', ... } entries.  Developer errors are the sole
+    // exception — they are re-thrown so the outer loop propagates them.
+    const promise = Promise.race([exec(client), timeoutPromise]).then(
+      (value) => {
+        clearTimeout(timerHandle);
+        controller.abort();
+        const normalizedKey = normalizer(value);
+        if (
+          normalizedKey === '[object Object]' &&
+          typeof value === 'object' &&
+          value !== null
+        ) {
+          const err = new Error(
+            'queryQuorum: object value requires explicit normalize() — default String(v) collapses all objects to "[object Object]"',
+          );
+          err.isDeveloperError = true;
+          throw err;
+        }
+        return { idx, url, status: 'fulfilled', value, normalizedKey };
+      },
+      (err) => {
+        clearTimeout(timerHandle);
+        controller.abort();
+        if (err && err.isDeveloperError) throw err;
+        return { idx, url, status: 'rejected', error: err?.message ?? String(err) };
+      },
+    );
+
+    return {
+      idx,
+      url,
+      promise,
+      abort: () => { clearTimeout(timerHandle); controller.abort(); },
+    };
+  });
+
+  // O(1) lookup by index when aborting remaining entries.
+  const entryByIdx = new Map(inflightEntries.map((e) => [e.idx, e]));
+
+  // Indices of URLs not yet settled.
+  const pendingIndices = new Set(inflightEntries.map((e) => e.idx));
+
+  /** @type {Array<{url:string, status:'fulfilled'|'rejected', value?:*, normalizedKey?:string, error?:string}>} */
+  const sources = [];
+
+  /** @type {Map<string, Array<{url:string,status:'fulfilled',value:*,normalizedKey:string}>>} */
+  const groups = new Map();
+
+  /** @type {Array<{url:string,status:'fulfilled',value:*,normalizedKey:string}>} */
+  const fulfilled = [];
+
+  /**
+   * Abort every still-pending request and append a placeholder source entry
+   * (status:'rejected', error:'aborted') for each.
+   */
+  function abortAndDrainPending() {
+    for (const idx of pendingIndices) {
+      const entry = entryByIdx.get(idx);
+      if (entry) {
+        entry.abort();
+        sources.push({ url: entry.url, status: 'rejected', error: 'aborted' });
+      }
+    }
+    pendingIndices.clear();
+  }
+
+  // Stream results one at a time using Promise.race on the pending set.
+  while (pendingIndices.size > 0) {
+    const racePromises = [...pendingIndices].map((idx) => entryByIdx.get(idx).promise);
+    const slot = await Promise.race(racePromises);
+
+    // slot.idx identifies which entry resolved — O(1) removal.
+    pendingIndices.delete(slot.idx);
+
+    // Re-throw developer errors (object-normalize footgun) immediately.
+    // (These cause the promise to reject rather than fulfill, so they propagate
+    // through Promise.race naturally; the isDeveloperError check is a safety net.)
+    if (slot.isDeveloperError) throw slot;
+
+    // Strip internal idx before storing in the public sources array.
+    const { idx: _idx, ...publicSlot } = slot;
+    sources.push(publicSlot);
+
+    if (slot.status === 'fulfilled') {
+      fulfilled.push(publicSlot);
+      const key = slot.normalizedKey;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(publicSlot);
+
+      if (mode === 'all') {
+        // Fail fast the moment a second distinct key appears.
+        if (groups.size > 1) {
+          abortAndDrainPending();
+          throw new RpcDisagreementError({
+            urls,
+            values: fulfilled.map((s) => ({ url: s.url, normalizedKey: s.normalizedKey, value: s.value })),
+          });
+        }
+        // All agree so far — keep accumulating.
+      } else {
+        // mode === 'majority'
+        const groupSize = groups.get(key).length;
+        if (groupSize >= majorityThreshold) {
+          // Unassailable mathematical majority — return immediately.
+          abortAndDrainPending();
+          const winnerSlot = groups.get(key)[0];
+          const losingMembers = fulfilled.filter((s) => s.normalizedKey !== key);
+          const earlyAgreement = losingMembers.length > 0
+            ? 'majority'
+            : fulfilled.length === 1 ? 'single' : 'unanimous';
+          return {
+            value: winnerSlot.value,
+            source: winnerSlot.url,
+            sources: [...sources],
+            agreement: earlyAgreement,
+            disagreements: losingMembers.map((s) => ({
+              url: s.url,
+              value: s.value,
+              normalizedKey: s.normalizedKey,
+            })),
+            mode: 'majority',
+          };
+        }
+
+        // Even if every remaining pending URL joined the best group, could it
+        // still reach majority threshold?  If not, no point waiting further.
+        const remaining = pendingIndices.size;
+        const bestGroupSize = Math.max(...[...groups.values()].map((g) => g.length));
+        if (bestGroupSize + remaining < majorityThreshold) {
+          abortAndDrainPending();
+          break; // fall through to post-loop majority/plurality calculation
+        }
+
+        // Winner-is-decided check: even without reaching majority threshold,
+        // the current leader may be guaranteed to win the plurality tie-break
+        // regardless of how all remaining pending URLs resolve.
+        //
+        // A leader with `L` votes cannot be dethroned when:
+        //   L >= bestRivalSize + remaining
+        // because even if every remaining URL joined the best rival group, the
+        // rival's total (bestRivalSize + remaining) would not exceed L.  In a
+        // tie (L == bestRivalSize + remaining) the tie is broken by first-
+        // arrival; since the leader group appeared earlier in `fulfilled`, it
+        // wins the tie.
+        //
+        // Guard: only apply when we already have at least 2 fulfilled responses.
+        // With only 1 fulfilled response the remaining URL could still turn a
+        // 'single' result into 'unanimous' (same value) or 'majority' (agreeing
+        // with a third party) — semantically meaningful upgrades.  Waiting for
+        // the second response costs little and gives callers richer metadata.
+        //
+        // This handles the common production case: two fast RPCs agree, one
+        // slow RPC is still pending.  The winner is already decided — waiting
+        // for the slow RPC only affects the `agreement` label, not the value.
+        if (remaining > 0 && fulfilled.length >= 2) {
+          const sortedEntries = [...groups.entries()].sort(([, a], [, b]) => {
+            if (b.length !== a.length) return b.length - a.length;
+            return fulfilled.indexOf(a[0]) - fulfilled.indexOf(b[0]);
+          });
+          const leaderSize = sortedEntries[0][1].length;
+          const bestRivalSize = sortedEntries.length > 1 ? sortedEntries[1][1].length : 0;
+          if (leaderSize >= bestRivalSize + remaining) {
+            // Winner is decided — remaining can neither change nor tie-beat it.
+            abortAndDrainPending();
+            break; // fall through to post-loop calculation with current data
+          }
+        }
+      }
+    } else {
+      // Rejected slot — check whether majority is still reachable or the
+      // winner is already decided.
+      if (mode === 'majority') {
+        const remaining = pendingIndices.size;
+        const bestGroupSize = groups.size > 0
+          ? Math.max(...[...groups.values()].map((g) => g.length))
+          : 0;
+        if (bestGroupSize + remaining < majorityThreshold) {
+          abortAndDrainPending();
+          break;
+        }
+
+        // Winner-is-decided check (same logic as the fulfilled branch above).
+        // Only apply with >= 2 fulfilled responses (same reasoning as above).
+        if (remaining > 0 && fulfilled.length >= 2 && groups.size > 0) {
+          const sortedEntries = [...groups.entries()].sort(([, a], [, b]) => {
+            if (b.length !== a.length) return b.length - a.length;
+            return fulfilled.indexOf(a[0]) - fulfilled.indexOf(b[0]);
+          });
+          const leaderSize = sortedEntries[0][1].length;
+          const bestRivalSize = sortedEntries.length > 1 ? sortedEntries[1][1].length : 0;
+          if (leaderSize >= bestRivalSize + remaining) {
+            abortAndDrainPending();
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // ── Post-loop: compute final answer from accumulated sources ─────────────────
+
+  const finalFulfilled = sources.filter(
+    (s) => s.status === 'fulfilled' && s.value !== null && s.value !== undefined,
+  );
+
+  if (finalFulfilled.length === 0) {
+    const reasons = sources
+      .map((s) => `${redactUrl(s.url)}: ${s.error ?? 'unknown'}`)
+      .join('; ');
+    throw new Error('all RPC providers failed: ' + reasons);
+  }
+
+  // ── mode: 'all' ──────────────────────────────────────────────────────────────
+  if (mode === 'all') {
+    // All successful responses agreed (any disagreement would have thrown above).
+    const winner = finalFulfilled[0];
+    return {
+      value: winner.value,
+      source: winner.url,
+      sources: [...sources],
+      agreement: finalFulfilled.length === 1 ? 'single' : 'unanimous',
+      disagreements: [],
+      mode: 'all',
+    };
+  }
+
+  // ── mode: 'majority' (post-loop: no mathematical majority reached) ───────────
+  // Determine plurality winner from what was collected.
+  // `groups` is already populated from the streaming loop above.
+
+  const sortedGroups = [...groups.entries()].sort(([, membersA], [, membersB]) => {
+    if (membersB.length !== membersA.length) return membersB.length - membersA.length;
+    // Tie: prefer the group whose first member arrived first.
+    return finalFulfilled.indexOf(membersA[0]) - finalFulfilled.indexOf(membersB[0]);
+  });
+
+  const [winningKey, winningMembers] = sortedGroups[0];
+  const losingMembers = finalFulfilled.filter((s) => s.normalizedKey !== winningKey);
+
+  const n = finalFulfilled.length;
+  let agreement;
+  if (sortedGroups.length === 1) {
+    agreement = n === 1 ? 'single' : 'unanimous';
+  } else {
+    const majority = Math.floor(n / 2) + 1;
+    agreement = winningMembers.length >= majority ? 'majority' : 'plurality';
+  }
+
+  return {
+    value: winningMembers[0].value,
+    source: winningMembers[0].url,
+    sources: [...sources],
+    agreement,
+    disagreements: losingMembers.map((s) => ({
+      url: s.url,
+      value: s.value,
+      normalizedKey: s.normalizedKey,
+    })),
+    mode: 'majority',
+  };
+}

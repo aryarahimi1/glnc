@@ -30,6 +30,7 @@ import { fetchTokenMeta } from '../chains/_evm.js';
 import { getPrice } from '../prices.js';
 import { decodeReceiptLogs } from './events.js';
 import { formatBtc } from '../chains/bitcoin.js';
+import { jsonSafeQuorum } from '../output/serialize.js';
 
 // Re-use a single viem client per chain for token symbol lookups
 import { makeClient } from '../chains/_evm.js';
@@ -514,9 +515,15 @@ export async function summarizeCalldata(chain, calldata, tx = null) {
   return buildSummary(chain, nested.registryEntry, nested.params, tx);
 }
 
-export async function decodeTransaction(chain, txHash) {
+export async function decodeTransaction(chain, txHash, opts = {}) {
+  const rpcQuorum = opts.rpcQuorum ?? 'any';
+  const raw       = opts.raw === true;
   const adapter = getChainAdapter(chain);
   if (!adapter) {
+    if (raw) {
+      return { __schema: 'glnc.tx-raw/v1', chain, hash: txHash, raw: null,
+               error: `Unsupported chain: ${chain}` };
+    }
     return {
       hash: txHash, chain, from: null, to: null,
       value: '0', gasUsed: '0', gasPriceGwei: '0',
@@ -530,7 +537,23 @@ export async function decodeTransaction(chain, txHash) {
 
   // ── Solana / Bitcoin pass-through ─────────────────────────────────────────
   if (chain === 'solana') {
-    const { tx, error } = await adapter.getTransaction(txHash);
+    if (raw) {
+      const solRaw = await adapter.getTransaction({ signature: txHash, rpcQuorum, raw: true });
+      // Solana adapter quorum.sources currently hold pre-stringified RPC results
+      // (no BigInts), but apply jsonSafeQuorum for symmetry with the EVM raw path
+      // so future adapter changes can't reintroduce the BigInt-serialize crash.
+      return {
+        __schema: 'glnc.tx-raw/v1',
+        chain,
+        hash:    txHash,
+        raw:     solRaw.rawRpc ?? null,
+        error:   solRaw.error ?? null,
+        ...(solRaw.source !== undefined ? { source: solRaw.source } : {}),
+        ...(solRaw.quorum !== undefined ? { quorum: jsonSafeQuorum(solRaw.quorum) } : {}),
+      };
+    }
+    const solRes = await adapter.getTransaction({ signature: txHash, rpcQuorum });
+    const { tx, error, source, slot, blockTime, quorum } = solRes;
     if (error || !tx) {
       return {
         hash: txHash, chain, from: null, to: null,
@@ -559,10 +582,15 @@ export async function decodeTransaction(chain, txHash) {
       raw:          { tx },
       tokenMovements: [],
       approvals:      [],
+      ...(source    !== undefined ? { source }    : {}),
+      ...(slot      !== undefined ? { slot }      : {}),
+      ...(blockTime !== undefined ? { blockTime } : {}),
+      ...(quorum    !== undefined ? { quorum: jsonSafeQuorum(quorum) } : {}),
     };
   }
 
   if (chain === 'bitcoin') {
+    // Bitcoin adapter is not quorum-enabled; uses its own fallback logic.
     const { tx, error } = await adapter.getTransaction(txHash);
     if (error || !tx) {
       return {
@@ -602,7 +630,26 @@ export async function decodeTransaction(chain, txHash) {
   }
 
   // ── EVM chains ────────────────────────────────────────────────────────────
-  const { tx, receipt, error } = await adapter.getTransaction(txHash);
+  const evmRes = await adapter.getTransaction({ hash: txHash, rpcQuorum });
+  const { tx, receipt, error, source, blockNumber, quorum } = evmRes;
+
+  if (raw) {
+    // EVM adapters already return raw viem `tx`+`receipt`. Wrap them under the
+    // tx-raw schema without going through the glnc.tx/v1 reshape pipeline.
+    // The adapter's `quorum` block carries raw viem objects (with BigInts) inside
+    // `sources[].value` and `disagreements[].value` — pass it through jsonSafeQuorum
+    // so the downstream JSON.stringify cannot throw on a BigInt.
+    return {
+      __schema: 'glnc.tx-raw/v1',
+      chain,
+      hash:    txHash,
+      raw:     error && !tx ? null : { tx: serializeBigInts(tx), receipt: serializeBigInts(receipt) },
+      error:   error ?? null,
+      ...(source      !== undefined ? { source }      : {}),
+      ...(blockNumber !== undefined ? { blockNumber } : {}),
+      ...(evmRes.quorum !== undefined ? { quorum: jsonSafeQuorum(evmRes.quorum) } : {}),
+    };
+  }
 
   if (error && !tx) {
     return {
@@ -669,6 +716,9 @@ export async function decodeTransaction(chain, txHash) {
     // Non-fatal — return empty arrays so the shape contract is always satisfied
   }
 
+  // EVM tx blockTimestamp is not fetched by the adapter (would require an
+  // extra eth_getBlockByNumber call per tx). We pass through whatever the
+  // adapter provides — currently `blockNumber` only.
   return {
     hash:         txHash,
     chain,
@@ -682,6 +732,9 @@ export async function decodeTransaction(chain, txHash) {
     summary,
     tokenMovements,
     approvals,
+    ...(source      !== undefined ? { source }      : {}),
+    ...(blockNumber !== undefined ? { blockNumber } : {}),
+    ...(quorum      !== undefined ? { quorum: jsonSafeQuorum(quorum) } : {}),
     raw: {
       tx:      serializeBigInts(tx),
       receipt: serializeBigInts(receipt),

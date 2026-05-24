@@ -89,13 +89,11 @@ export const BTC_TX_SIZES = {
 
 // ─── Solana constants ────────────────────────────────────────────────────────
 
-// Free public Solana RPCs tried in order. PublicNode has higher rate limits
-// when reachable; mainnet-beta is the canonical fallback; BlastAPI is a final
-// safety net. All keyless. Each call will try them sequentially on failure.
+// Free public Solana RPCs tried in order — same curated list as
+// src/chains/solana.js (re-verified 2026-05; no API key required).
 const SOLANA_RPC_URLS = [
-  'https://solana-rpc.publicnode.com',
+  'https://solana.lava.build',
   'https://api.mainnet-beta.solana.com',
-  'https://solana-mainnet.public.blastapi.io',
 ];
 const SOLANA_BASE_LAMPORTS_PER_SIG = 5_000;
 
@@ -171,7 +169,7 @@ function derivePriorityTiers(reward) {
 
 async function getEvmGas(chainName) {
   const adapter = EVM_ADAPTERS[chainName];
-  const client  = makeClient(adapter.RPC_URL, adapter.viemChain);
+  const client  = makeClient(adapter.RPC_URLS[0], adapter.viemChain);
   const isL2    = L2_CHAINS.has(chainName);
 
   // Primary path: eth_feeHistory.
@@ -370,6 +368,10 @@ async function getBitcoinGas() {
 
 // ─── Solana fetcher ──────────────────────────────────────────────────────────
 
+/**
+ * @returns {Promise<{ result: any, source: string }>} — `source` is the URL
+ *   that successfully answered (for provenance / attribution).
+ */
 async function solanaRpc(method, params, timeoutMs = 8000) {
   let lastErr;
   for (const url of SOLANA_RPC_URLS) {
@@ -389,7 +391,7 @@ async function solanaRpc(method, params, timeoutMs = 8000) {
         lastErr = new Error(json.error.message ?? 'rpc error');
         continue;
       }
-      return json.result;
+      return { result: json.result, source: url };
     } catch (err) {
       lastErr = err;
     }
@@ -412,10 +414,13 @@ function classifySolanaCongestion(p50, tps) {
 
 async function getSolanaGas() {
   try {
-    const [feesRes, perfRes] = await Promise.all([
+    const [feesCall, perfCall] = await Promise.all([
       solanaRpc('getRecentPrioritizationFees', [[]]),
       solanaRpc('getRecentPerformanceSamples', [4]).catch(() => null),
     ]);
+
+    const feesRes = feesCall.result;
+    const perfRes = perfCall?.result ?? null;
 
     const fees = (feesRes ?? [])
       .map(e => Number(e?.prioritizationFee))

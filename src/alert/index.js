@@ -188,7 +188,7 @@ async function runIteration(rawAddress, opts) {
   let balanceResult = null;
   let aaveResult = null;
   try {
-    const tasks = [adapter.getBalances(resolvedAddress)];
+    const tasks = [adapter.getBalances({ address: resolvedAddress })];
     if (needsAave) {
       tasks.push(getAavePositions(resolvedAddress, chain));
     }

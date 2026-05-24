@@ -45,13 +45,13 @@ function record(label, ok, detail, status = ok ? 'PASS' : 'FAIL') {
 
 // ─── Gas: Ethereum (compare base fee vs independent RPC) ────────────────────
 // Query several independent RPCs and take the median to suppress lagging/forked
-// nodes (e.g. llamarpc occasionally lags by 100k blocks). Rejects nodes that
-// return a different chainId or a non-mainnet block height.
+// nodes. Rejects nodes that return a different chainId or a non-mainnet block
+// height.
 async function indepEthBaseGwei() {
   const urls = [
     'https://eth.drpc.org',
     'https://ethereum.publicnode.com',
-    'https://rpc.ankr.com/eth',
+    'https://eth.merkle.io',
     'https://cloudflare-eth.com',
   ];
   const samples = [];
@@ -67,7 +67,7 @@ async function indepEthBaseGwei() {
     } catch { /* ignore */ }
   }));
   if (samples.length === 0) throw new Error('all independent ETH RPCs failed');
-  // Drop any node lagging by >50 blocks behind the max — llamarpc is a known offender.
+  // Drop any node lagging by >50 blocks behind the max.
   const maxH = Math.max(...samples.map(s => s.height));
   const fresh = samples.filter(s => maxH - s.height <= 50);
   fresh.sort((a, b) => a.gwei - b.gwei);
@@ -89,7 +89,7 @@ async function checkPolyGas() {
   const [glnc, indep] = await Promise.all([
     getGas('polygon'),
     rpcAny(
-      ['https://polygon.llamarpc.com', 'https://rpc.ankr.com/polygon', 'https://polygon.drpc.org'],
+      ['https://polygon-bor-rpc.publicnode.com', 'https://polygon.drpc.org', 'https://1rpc.io/matic'],
       'eth_getBlockByNumber', ['latest', false]
     ),
   ]);
@@ -162,8 +162,7 @@ async function checkSolGas() {
   const { result: indep } = await rpcAny(
     [
       'https://api.mainnet-beta.solana.com',
-      'https://solana-rpc.publicnode.com',
-      'https://solana-mainnet.public.blastapi.io',
+      'https://solana.lava.build',
     ],
     'getRecentPerformanceSamples', [4]
   );

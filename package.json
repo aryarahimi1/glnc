@@ -1,6 +1,6 @@
 {
   "name": "glnc",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "type": "module",
   "files": [
     "bin",
@@ -12,7 +12,7 @@
     "glnc": "./bin/glnc.js"
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
+    "test": "GLNC_TEST=1 node --test test/*.test.js",
     "start": "node bin/glnc.js",
     "start:bun": "bun bin/glnc.js",
     "interactive": "node bin/glnc.js interactive",

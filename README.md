@@ -23,6 +23,8 @@ glnc gas                                  ← live gas across 9 chains
 | | |
 |---|---|
 | **Zero tracking** | All RPCs are free public endpoints. No account, no API key, nothing phoned home |
+| **Multi-RPC quorum (v1.2)** | Every EVM chain ships 2–3 hardcoded public RPCs. Default is sequential fallback; `--rpc-quorum=majority`/`all` fans out in parallel, picks the plurality, and records disagreements in the envelope |
+| **Source attribution (v1.2)** | The envelope records which RPC URL answered for each chain (`meta.sources.rpc.providers`) and the block/slot it answered at, so two consecutive runs can be replayed and compared |
 | **Token auto-discovery** | Scans ~1,400 tokens per chain via the Uniswap token list — not just USDC/USDT |
 | **ENS resolution** | `vitalik.eth` just works. Reverse lookup annotates addresses too |
 | **Multi-wallet** | Pass multiple addresses; get per-wallet tables + portfolio grand total |
@@ -37,6 +39,50 @@ glnc gas                                  ← live gas across 9 chains
 | **Hardened webhook** | SSRF-validated URLs, scheme allowlist, RFC1918/IMDS/loopback blocked |
 | **JSON + NDJSON** | Stable, versioned envelopes on stdout — `--json` for one-shot, NDJSON for `--watch` |
 | **9 chains for balance · 8 for tx · 9 for gas** | See the [Chain support matrix](#chain-support-matrix) |
+
+---
+
+## What's new in v1.2.0 — "Honest multi-RPC"
+
+A single RPC endpoint is one vendor's view of the chain. Until v1.2.0 glnc
+presented that view as truth — if `publicnode` was wrong (stale, censoring,
+mis-synced, or returning a 0 balance because they rate-limited you anonymously),
+glnc was wrong with it. v1.2.0 stops doing that:
+
+- Every EVM chain now ships **2–3 hardcoded public RPC URLs** in a `RPC_URLS[]`
+  array per adapter. Default mode (`--rpc-quorum=any`) is **sequential
+  fallback** — try them in order, return the first success — so free-tier
+  endpoints don't get triple-loaded for every casual query.
+- `--rpc-quorum=majority` queries all providers in parallel, picks the
+  plurality, and records the dissenters in `meta.sources.rpc.disagreements[]`.
+- `--rpc-quorum=all` requires unanimous agreement and errors on any
+  disagreement (combine with `--strict` to exit 3).
+- Every balance/tx envelope now carries `meta.sources.rpc.providers` (which
+  redacted URL answered for each chain) and a per-chain `blockNumber` (EVM) or
+  `slot` (Solana) so consumers can attribute every number to a specific
+  vendor + chain position.
+- A new `tx --raw` flag returns the upstream RPC response verbatim under
+  schema `glnc.tx-raw/v1` — no glnc-level reshaping, so what you see is what
+  the provider actually said.
+- **Quorum degradation is surfaced, not hidden.** When `--rpc-quorum=majority`
+  or `all` is requested but fewer providers responded than the policy needs
+  (e.g. 1-of-3), the chain is listed in `meta.sources.rpc.degraded[]`,
+  `meta.partial` flips to `true`, and an interactive TTY sees a one-line
+  stderr warning. You asked for quorum; you find out when you didn't get it.
+- **The RPC list was re-curated against live availability before tag.** Ankr
+  was removed (now requires API keys), `*.llamarpc.com` was removed (dead DNS
+  or broken TLS on every chain), `polygon-rpc.com` was removed (auth-only),
+  plus several dead Solana endpoints. Replacements: drpc.org, eth.merkle.io,
+  1rpc.io/matic, solana.lava.build. Solana ships 2 URLs (the free-public
+  landscape is sparse); linea ships 3.
+- **Bad flag combinations fail loudly at parse time.** `glnc balance --raw`,
+  `glnc gas --rpc-quorum=majority`, `glnc history --rpc-quorum=all`, etc.
+  return `Error: --raw is only supported on the 'tx' command` (or the
+  equivalent for `--rpc-quorum`) and exit 1 instead of silently no-op'ing.
+
+glnc does not verify on-chain truth; it surfaces vendor disagreement and lets
+you decide what to do about it. See [Multi-RPC quorum](#multi-rpc-quorum)
+below, or the full [CHANGELOG](CHANGELOG.md).
 
 ---
 
@@ -70,7 +116,7 @@ Environment overrides:
 <details>
 <summary><b>Build from source (advanced)</b></summary>
 
-For contributors. Requires Node ≥ 18 (or [Bun](https://bun.sh) ≥ 1.0).
+For contributors. Requires Node ≥ 20.10 (or [Bun](https://bun.sh) ≥ 1.0).
 
 ```sh
 git clone <repo-url>
@@ -117,6 +163,8 @@ Per-command help is the canonical reference — `glnc balance --help`,
 | `--json` | Emit machine-readable JSON on stdout (NDJSON when combined with `--watch`) |
 | `--ndjson` | Force NDJSON even for one-shot commands |
 | `--strict` | One-shot: exit **3** on a partial result (see `meta.partial`). Watch: abort on the first fetch *exception* instead of emitting an `error` event (partial polls keep streaming). Default keeps exit code 0 for scripts already in production. |
+| `--rpc-quorum <any\|majority\|all>` | `balance` + `tx`: RPC consensus policy. `any` (default) — sequential, return first success. `majority` — parallel, plurality wins, dissent recorded in `meta.sources.rpc.disagreements`. `all` — parallel, unanimous required, throws on disagreement. See [Multi-RPC quorum](#multi-rpc-quorum) |
+| `--raw` | `tx` only: emit the upstream RPC `getTransaction` response verbatim under schema `glnc.tx-raw/v1`. Shape is provider-defined and NOT stable across providers or chains. Implies `--json` |
 | `--no-color` | Disable ANSI colors. `NO_COLOR` env and `--json`/`--ndjson` also disable colors |
 
 ---
@@ -435,9 +483,9 @@ internal hops between contracts are filtered out.
 
 | Data | Source |
 |---|---|
-| EVM RPC | `ethereum-rpc.publicnode.com`, `polygon-bor-rpc.publicnode.com`, `arb1.arbitrum.io/rpc`, `mainnet.base.org`, `optimism-rpc.publicnode.com`, `linea-rpc.publicnode.com`, `mainnet.era.zksync.io` |
-| Solana RPC | `solana-rpc.publicnode.com` (primary) → `api.mainnet-beta.solana.com` → `solana-mainnet.public.blastapi.io` (fallback chain) |
-| Bitcoin | `mempool.space/api` (gas) and `blockstream.info/api` (balances) |
+| EVM RPC (per-chain arrays; see [Multi-RPC quorum](#multi-rpc-quorum)) | Ethereum: `ethereum-rpc.publicnode.com`, `eth.drpc.org`, `eth.merkle.io`. Polygon: `polygon-bor-rpc.publicnode.com`, `polygon.drpc.org`, `1rpc.io/matic`. Arbitrum: `arbitrum-rpc.publicnode.com`, `arb1.arbitrum.io/rpc`, `arbitrum.drpc.org`. Base: `base-rpc.publicnode.com`, `mainnet.base.org`, `base.drpc.org`. Optimism: `optimism-rpc.publicnode.com`, `mainnet.optimism.io`, `optimism.drpc.org`. Linea: `linea-rpc.publicnode.com`, `rpc.linea.build`, `linea.drpc.org`. zkSync: `mainnet.era.zksync.io`, `zksync.drpc.org` |
+| Solana RPC | `solana.lava.build`, `api.mainnet-beta.solana.com` |
+| Bitcoin | `mempool.space/api` (gas) → `blockstream.info/api` (gas fallback); `blockstream.info/api` for balances. Single-endpoint; not multi-RPC |
 | ENS | Resolved via mainnet RPC (standard ENS contracts) |
 | USD prices | CoinGecko free public API (60s in-memory cache) |
 | Token list | `tokens.uniswap.org` (24h disk cache at `~/.glnc/token-cache.json`) |
@@ -446,8 +494,107 @@ internal hops between contracts are filtered out.
 
 All RPCs are free public endpoints. Free-tier CoinGecko has a rate limit
 (~30 req/min) — the in-memory cache prevents hitting it during normal use.
-Solana automatically falls back across three RPCs because `mainnet-beta`
-throttles anonymous traffic hard.
+
+Per-chain redundancy is uneven: Ethereum, Polygon, Arbitrum, Base, Optimism,
+and Linea each have 3 RPC URLs; Solana and zkSync have 2 (curated public
+endpoints for those chains are scarcer). Bitcoin is single-endpoint per call
+(mempool.space → blockstream.info is a gas-only fallback, not a quorum).
+See [Multi-RPC quorum](#multi-rpc-quorum) for what the modes actually do.
+
+---
+
+## Multi-RPC quorum
+
+`balance` and `tx` accept `--rpc-quorum <any|majority|all>`. The mode controls
+how the per-chain `RPC_URLS[]` array is consulted and what the envelope
+reports back.
+
+### Modes
+
+| Mode | Fan-out | Behavior | When to use |
+|---|---|---|---|
+| `any` (default) | Sequential | Try URLs in order. Return on the first success. Untried URLs are recorded as `not-tried` in the per-URL `sources[]`. Cannot detect disagreement — by design | Casual interactive use; minimises load on free-tier RPCs |
+| `majority` | Parallel | Query every URL concurrently. Group fulfilled responses by normalized value, pick the plurality winner (ties broken by response order), record losers in `meta.sources.rpc.disagreements[]` | Scripted automation that wants the dissent surfaced but not fatal |
+| `all` | Parallel | Query every URL concurrently. Require unanimous agreement across successful responses. Throw `RpcDisagreementError` on any divergence (combined with `--strict`, this exits 3) | Tripwire mode; fail-closed if any provider disagrees |
+
+Default mode is `any` because tripling load on shared public RPCs for every
+`glnc balance vitalik.eth` would get the project banned. Detection of
+disagreement is opt-in for that reason — `--rpc-quorum=any` cannot report
+disagreement because it only ever talks to one provider in the happy path.
+
+### Example invocations
+
+```sh
+# Default: sequential fallback. Only the first successful RPC is consulted.
+glnc balance 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
+
+# Parallel + plurality. Disagreements are recorded in the envelope but don't fail.
+glnc balance 0xd8dA... --rpc-quorum majority --json | jq .meta.sources.rpc
+
+# Unanimous required. Combined with --strict, any disagreement exits 3.
+glnc balance 0xd8dA... --rpc-quorum all --strict
+
+# Same modes work for the tx command:
+glnc tx 0x02d15281c5514a447192cc8d6140216050f8d3bf92efccd420b635274764fb94 \
+  --rpc-quorum majority --json
+```
+
+### Per-chain redundancy
+
+| Chain | RPC count |
+|---|---|
+| Ethereum, Polygon, Arbitrum, Base, Optimism, Linea | 3 |
+| Solana, zkSync | 2 |
+| Bitcoin | 1 (mempool.space → blockstream.info for gas-only fallback; no quorum) |
+
+`--rpc-quorum=majority`/`all` requires at least 2 URLs to be meaningful. Solana
+and zkSync run in 2-of-2 mode (any single failure can still produce a result
+under `majority` via plurality of the remaining responder).
+
+### Disagreement warnings on stderr
+
+When `--rpc-quorum=majority` produces a disagreement and stderr is an
+interactive TTY, glnc emits one human-readable line per disagreeing chain
+before printing the table:
+
+```
+! ethereum: balance disagreement (publicnode=12.4 ETH, drpc=0 ETH, merkle=12.4 ETH) — using majority
+```
+
+Suppressed automatically when output is `--json` / `--ndjson`, when stderr is
+piped or redirected, and during `--watch` (the disagreement is still recorded
+in the per-poll envelope; the warning is just a one-shot UX cue).
+
+### Privacy disclosure
+
+Multi-RPC has a privacy cost worth being explicit about.
+
+- In **`--rpc-quorum=any`** (default) on EVM, only the **first** URL is
+  contacted in the happy path; later URLs are tried only if earlier ones fail.
+  Solana's `any` mode behaves the same way (sequential, not parallel).
+- In **`--rpc-quorum=majority`** and **`--rpc-quorum=all`**, the queried
+  wallet address (or tx hash) is sent to **every URL in the chain's array,
+  in parallel**. That is a meaningful expansion of who sees your activity.
+
+The public RPC providers currently in use are:
+
+- **publicnode** (`*.publicnode.com`) — ethereum, polygon, arbitrum, base, optimism, linea
+- **drpc** (`*.drpc.org`) — ethereum, polygon, arbitrum, base, optimism, linea, zksync
+- **eth.merkle.io** (Merkle) — ethereum
+- **1rpc.io/matic** (Automata) — polygon
+- **arb1.arbitrum.io/rpc** (Offchain Labs) — arbitrum
+- **mainnet.base.org** (Coinbase / Base) — base
+- **mainnet.optimism.io** (Optimism Foundation) — optimism
+- **rpc.linea.build** (Consensys) — linea
+- **mainnet.era.zksync.io** (Matter Labs) — zksync
+- **solana.lava.build** (Lava Network) — solana
+- **api.mainnet-beta.solana.com** (Solana Foundation) — solana
+
+All are anonymous public endpoints — no account, no header beyond JSON-RPC
+content-type — but a query under `--rpc-quorum=majority`/`all` does fan your
+address out to every one of them simultaneously. URLs in the envelope are
+redacted (credentials and query strings stripped) so the output is safe to
+paste; the redaction happens at the output boundary, not inside the helper.
 
 ---
 
@@ -486,26 +633,74 @@ breaking changes.
 
 ### Source metadata (`meta`)
 
-`balance` and `gas` envelopes (one-shot and watch) carry an optional `meta`
-block so scripted consumers can tell whether a price came from a fresh
+`balance`, `tx`, and `gas` envelopes (one-shot and watch) carry an optional
+`meta` block so scripted consumers can tell whether a price came from a fresh
 CoinGecko call or from a cached value, whether the token list fell back to
-the hardcoded fallback, and whether any chain RPC failed.
+the hardcoded fallback, and whether any chain RPC failed. `balance` and `tx`
+additionally surface which RPC provider ultimately answered for each chain
+(`meta.sources.rpc.providers`, v1.2) and whether providers disagreed when
+queried under `--rpc-quorum=majority` (`meta.sources.rpc.disagreements`,
+v1.2). `gas` does not currently use the quorum helper.
 
 ```jsonc
 "meta": {
   "sources": {
-    "rpc":       { "ok": true,  "chainsFailed": [] },
+    "rpc": {
+      "ok":            true,
+      "chainsFailed":  [],
+      // v1.2: which RPC URL (redacted) answered for each chain
+      "providers": {
+        "ethereum": "https://ethereum-rpc.publicnode.com/",
+        "polygon":  "https://polygon-bor-rpc.publicnode.com/"
+      },
+      // v1.2: per-chain disagreement records. Empty under --rpc-quorum=any
+      // (cannot detect; only one provider was contacted). Populated under
+      // --rpc-quorum=majority when providers diverged.
+      "disagreements": [
+        {
+          "chain":     "ethereum",
+          "agreement": "majority",   // "unanimous" | "majority" | "plurality" | "single"
+          "providers": [
+            { "url": "https://ethereum-rpc.publicnode.com/", "value": "12400000000000000000", "agreed": true  },
+            { "url": "https://eth.drpc.org/",                 "value": "0",                    "agreed": false },
+            { "url": "https://eth.merkle.io/",                "value": "12400000000000000000", "agreed": true  }
+          ],
+          "picked":   { "url": "https://ethereum-rpc.publicnode.com/", "value": "12400000000000000000" }
+        }
+      ]
+    },
     "prices":    { "ok": true,  "provider": "coingecko",
                    "cacheAgeSec": 12, "stale": false,
                    "rateLimited": false, "unpriced": ["XYZ"] },
     "tokenList": { "ok": true,  "source": "uniswap",
                    "cacheAgeSec": 0, "fallback": false }
   },
-  "partial":  false,         // true if ANY source above degraded
+  "partial":  false,         // true if ANY source above degraded — incl. a disagreement
   "warnings": []
 }
 ```
 
+- `rpc.providers` (v1.2) maps each successful chain to the URL of the RPC that
+  ultimately answered. Credentials and query strings are stripped at the
+  envelope boundary; URLs in this map are always safe to log. Failed chains
+  are omitted (no winning URL to attribute).
+- `rpc.disagreements[]` (v1.2) is empty by default. It is only populated when
+  `--rpc-quorum=majority` is set and at least two providers return different
+  normalized values for the same chain. `agreement` mirrors the quorum
+  helper's classification: `unanimous` (all agreed), `majority` (winner had
+  ⌈n/2⌉+1 votes), `plurality` (largest group, but below majority threshold),
+  or `single` (only one provider responded successfully). `picked.url` matches
+  one of the `providers[]` entries with `agreed: true`.
+- `agreement: "single"` is the **degraded quorum** outcome: the user requested
+  `--rpc-quorum=majority`/`all` but only one of the configured providers
+  answered (others timed out or errored). The value is still returned, the
+  chain name is surfaced in `meta.sources.rpc.degraded[]`, and `meta.partial`
+  flips to `true` so `--strict` exits 3. The two fields pair: `degraded[]`
+  lists the chains that fell back to a single responder; `disagreements[]`
+  carries the per-provider record (with `agreement: "single"`).
+- `partial` is `true` if **any** source degraded — including a non-empty
+  `rpc.disagreements[]`. So `--rpc-quorum=majority --strict` will exit 3 on a
+  disagreement even when the picked value is still returned.
 - `prices.cacheAgeSec` is the age of the **oldest** price in the response (so
   a single fresh fetch surfaces 0; a 59s-cached fetch surfaces 59).
 - `prices.stale` is `true` only when an upstream call failed and the response
@@ -522,6 +717,23 @@ the hardcoded fallback, and whether any chain RPC failed.
   degraded in any way for this call. **Combine with `--strict` for scripted
   short-circuit** (see exit codes).
 
+### Per-chain freshness (v1.2)
+
+Each chain entry inside `data.wallets[].chains[]` also carries provenance
+fields so two consecutive runs can be compared against the same chain
+position, not just the same wall-clock:
+
+| Field | Chains | Description |
+|---|---|---|
+| `source` | All | The redacted URL of the RPC that answered for *this chain* on *this wallet*. Matches `meta.sources.rpc.providers[chain]` |
+| `blockNumber` | EVM | Block height the balance was read at. Stringified at the JSON boundary because viem returns BigInt |
+| `slot` | Solana | Slot the native balance was read at. `blockTime` is intentionally not fetched (would cost an extra RPC call) |
+| `quorum` | All, when `--rpc-quorum !== 'any'` | Per-chain quorum block: `{ agreement, sources[], disagreements[] }`. Mirrors the aggregated `meta.sources.rpc.disagreements` entry but scoped to one chain |
+
+For the `tx` command, the same fields land on the top-level envelope:
+`source`, `blockNumber` (EVM, null for unmined) or `slot` + `blockTime`
+(Solana), and `quorum` when applicable.
+
 ### Schema reference
 
 | Schema id | Emitted by | Mode |
@@ -529,6 +741,7 @@ the hardcoded fallback, and whether any chain RPC failed.
 | `glnc.balance/v1`        | `glnc balance ... --json`             | single document |
 | `glnc.balance.watch/v1`  | `glnc balance ... --watch --json`     | NDJSON stream   |
 | `glnc.tx/v1`             | `glnc tx ... --json`                  | single document |
+| `glnc.tx-raw/v1` (v1.2)  | `glnc tx ... --raw`                   | single document — provider-native payload, NOT stable across providers or chains |
 | `glnc.gas/v1`            | `glnc gas --json`                     | single document |
 | `glnc.gas.watch/v1`      | `glnc gas --watch --json`             | NDJSON stream   |
 | `glnc.alert/v1`          | `glnc alert ... --json`               | NDJSON stream   |
@@ -590,6 +803,48 @@ Other event lines: `{"event":"error", ok:false, error:{code,message}}` and a fin
 
 **`glnc.tx/v1`**, **`glnc.gas/v1`**, **`glnc.gas.watch/v1`**, **`glnc.alert/v1`**, **`glnc.history/v1`** — see the comments in `src/output/schemas.js` and `src/index.js` for full field listings; the shapes are stable within `v1`.
 
+**`glnc.tx-raw/v1`** (v1.2) — emitted by `glnc tx ... --raw`. `data` looks like:
+
+```jsonc
+{
+  "chain": "ethereum",
+  "hash":  "0x02d15281...",
+  "raw":   { /* provider-native payload — see below */ },
+  "error": null,
+  "source": "https://ethereum-rpc.publicnode.com/",
+  // present only when --rpc-quorum !== 'any':
+  "quorum": { "agreement": "...", "sources": [...], "disagreements": [...] }
+}
+```
+
+The `raw` field is **provider-defined and not normalised by glnc**. The exact
+shape differs across chains and across RPC providers within a chain. This is
+intentional — the entire point of `--raw` is to surface the upstream response
+without glnc reshaping it.
+
+- **EVM** (any chain): `raw` is `{ tx, receipt }` exactly as viem's
+  `getTransaction` and `getTransactionReceipt` returned them. BigInt fields
+  (value, gasUsed, gasPrice, blockNumber, etc.) are stringified at the JSON
+  boundary so `JSON.stringify` doesn't throw, but the field names and the
+  overall structure are viem's, not glnc's.
+- **Solana**: `raw` is the JSON-RPC `result` object from `getTransaction`
+  verbatim — `slot`, `blockTime`, `meta` (with `logMessages`, `fee`, `err`,
+  `innerInstructions`, pre/post balances), and `transaction` (with the
+  original `signatures[]` array, not renamed to `hash`). No synthetic
+  receipt is bolted on.
+
+`--raw` implies `--json` because the payload is for machines, not humans.
+Use the default `glnc.tx/v1` schema if you want a stable cross-chain shape.
+
+```sh
+# EVM raw payload
+glnc tx 0x02d15281... --raw | jq .data.raw.tx.gasPrice
+
+# Solana raw payload — note signatures[] is preserved (plural array)
+glnc tx <sig> --chain solana --raw | jq '.data.raw.transaction.signatures'
+glnc tx <sig> --chain solana --raw | jq '.data.raw.meta.fee'
+```
+
 ### Five worked one-liners
 
 **1. Slack alert when a wallet moves more than $100 between polls:**
@@ -639,6 +894,7 @@ glnc balance $WALLET --json \
 - The `poll` counter resets per process — use it to detect first-run vs steady-state if you want to skip noisy initial-state events.
 - `--strict` has two distinct semantics depending on mode. **One-shot** (`balance`/`gas` without `--watch`): a partial result (any source degraded — see `meta.partial`) exits **3** instead of 0. **Watch mode** (`balance`/`gas` with `--watch`): aborts on the first fetch *exception* instead of emitting an `error` event and continuing — the loop keeps streaming on `meta.partial: true` polls so consumers can `jq 'select(.meta.partial == false)'` for themselves. Without `--strict`, default behavior is preserved (exit 0 with `meta.partial` embedded) so scripts already in production don't regress.
 - Gate scripted automation on `meta.partial` and `meta.sources.prices.rateLimited` before mutating anything — `priceUsd: null` could mean "CoinGecko doesn't know this token" *or* "we got rate-limited"; `meta` is how you tell them apart.
+- For balance/state-critical scripting, run with `--rpc-quorum=majority` and check `meta.sources.rpc.disagreements.length === 0` before acting. `--rpc-quorum=any` is faster and lighter on free-tier RPCs but cannot detect provider disagreement — it talks to one provider in the happy path. Use `--rpc-quorum=all --strict` for tripwire scripts that should refuse to act on divergent data.
 - Use `--ndjson` to force one-object-per-line output even on one-shot commands (handy when piping through tools that prefer line-delimited input).
 
 ---
@@ -691,12 +947,12 @@ glnc/
       schemas.js            # stable schema id constants
       stderr.js             # human chatter routing helpers
     chains/
-      _evm.js               # shared viem utilities + token lists
+      _evm.js               # shared viem utilities + token lists + queryQuorum helper
       ethereum.js           # full adapters (balance + tx + gas)
       polygon.js
       arbitrum.js
       base.js
-      solana.js             # multi-RPC fallback (publicnode → mainnet-beta → blastapi)
+      solana.js             # multi-RPC quorum (lava, mainnet-beta)
       bitcoin.js
       optimism.js           # full adapter (balance + tx + gas)
       linea.js

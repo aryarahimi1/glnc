@@ -3,21 +3,8 @@
  *
  * Minimal argument parser — no external dependencies.
  *
- * Parses process.argv into a structured command object:
- *   {
- *     command: 'balance' | 'tx' | 'help' | 'version',
- *     address: string | null,       // addresses[0] ?? null — backward-compat
- *     addresses: string[],          // all addresses for multi-wallet balance
- *     txHash: string | null,
- *     chain: string | null,         // value of --chain flag, lowercased
- *     json: boolean,                // true if --json was passed
- *     verbose: boolean,
- *     watch: boolean,               // true if --watch / -w was passed
- *     interval: number,             // seconds between watch refreshes (default 15)
- *     positions: boolean,           // true if --positions / -p was passed
- *     raw: string[],                // original argv slice after 'bun run glnc.js'
- *   }
- *
+ * Parses process.argv into a structured command object. The full shape is
+ * defined by the ParsedArgs typedef below — keep that as the source of truth.
  * Throws a ParseError (exitCode 1) for bad usage.
  */
 
@@ -65,6 +52,8 @@ function parseInterval(value) {
  *   once: boolean,
  *   dryRun: boolean,
  *   rpc: string|null,
+ *   rpcQuorum: 'any'|'majority'|'all',
+ *   txRaw: boolean,
  *   raw: string[]
  * }} ParsedArgs
  */
@@ -103,6 +92,8 @@ export function parseArgs(argv) {
   let showUnpriced = false;
   let costBasis = null;     // null | 'none' | 'fifo' — gates FIFO computation in `history`
   let ownWallets = [];      // string[] — addresses to treat as own for transfer detection
+  let rpcQuorum = 'any';
+  let txRaw = false;
   let helpRequested = false;
 
   // Extract flags anywhere in argv; non-flag tokens go into filtered
@@ -168,6 +159,19 @@ export function parseArgs(argv) {
         throw new ParseError('--rpc requires a URL');
       }
       rpc = argv[++i];
+    } else if (arg.startsWith('--rpc-quorum=')) {
+      rpcQuorum = arg.slice('--rpc-quorum='.length).toLowerCase();
+    } else if (arg === '--rpc-quorum') {
+      if (i + 1 >= argv.length) {
+        throw new ParseError('--rpc-quorum requires a value (any|majority|all)');
+      }
+      rpcQuorum = argv[++i].toLowerCase();
+    } else if (arg === '--raw') {
+      // `tx --raw` returns the original RPC `getTransaction` response verbatim
+      // wrapped in a glnc.tx-raw/v1 envelope. Implies --json since the raw
+      // shape is per-provider machine data, not the human-rendered glnc shape.
+      txRaw = true;
+      json  = true;
     } else if (arg.startsWith('--from=')) {
       fromDate = arg.slice('--from='.length);
     } else if (arg === '--from') {
@@ -247,6 +251,27 @@ export function parseArgs(argv) {
     );
   }
 
+  // Validate --rpc-quorum value.
+  if (rpcQuorum !== 'any' && rpcQuorum !== 'majority' && rpcQuorum !== 'all') {
+    throw new ParseError(
+      `--rpc-quorum must be "any", "majority", or "all" (got: ${JSON.stringify(rpcQuorum)})`
+    );
+  }
+
+  // Reject --rpc-quorum on commands that don't fan out across providers.
+  // NB: per-chain quorum support varies (e.g. bitcoin is single-endpoint);
+  // the meta `providers` map shows which chains actually fanned out.
+  if (rpcQuorum !== 'any' && first !== 'balance' && first !== 'tx') {
+    throw new ParseError(
+      `--rpc-quorum is only supported on 'balance' and 'tx' commands (got: '${first}')`
+    );
+  }
+
+  // Reject --raw on non-tx commands (silent no-op otherwise).
+  if (txRaw && first !== 'tx') {
+    throw new ParseError(`--raw is only supported on the 'tx' command (got: '${first}')`);
+  }
+
   // Validate --own-wallets address format. Empty list is fine.
   for (const a of ownWallets) {
     if (!/^0x[0-9a-fA-F]{40}$/.test(a)) {
@@ -260,7 +285,8 @@ export function parseArgs(argv) {
   const flagBase = {
     chain, json, ndjson, strict, schemaInfo,
     verbose, watch, interval, positions, nfts,
-    condition, webhook, once, dryRun, rpc,
+    condition, webhook, once, dryRun, rpc, rpcQuorum,
+    txRaw,
     fromDate, toDate, outPath, apiKey, noPrices, showUnpriced,
     costBasis, ownWallets,
     raw,

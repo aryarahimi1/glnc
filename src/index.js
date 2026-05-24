@@ -40,6 +40,13 @@ import { isBitcoinBech32Valid } from './chains/_bech32.js';
 import { wrap, wrapError, wrapEvent } from './output/envelope.js';
 import { emitJSON, emitNDJSON } from './output/emit.js';
 import { SCHEMA } from './output/schemas.js';
+import {
+  jsonSafeQuorum,
+  jsonSafeQuorumValue,
+  redactUrl,
+  buildDisagreementEntry,
+  isDisagreement,
+} from './output/serialize.js';
 
 export { runAlert } from './alert/index.js';
 export { runHistory } from './history/run.js';
@@ -164,12 +171,21 @@ async function loadChainAdapter(chain) {
  *
  * @returns {Promise<{decodeTransaction: Function}|null>}
  */
+let _decoderOverride = null;
 async function loadDecoder() {
+  if (_decoderOverride) return _decoderOverride;
   try {
     return await import('./decoders/index.js');
   } catch {
     return null;
   }
+}
+// @internal test-only — inject a decoder stub. Pass null to restore default.
+function __setDecoderForTest(d) {
+  if (process.env.NODE_ENV !== 'test' && process.env.GLNC_TEST !== '1') {
+    throw new Error('__setDecoderForTest is a test-only hook; set NODE_ENV=test or GLNC_TEST=1');
+  }
+  _decoderOverride = d;
 }
 
 /**
@@ -349,7 +365,10 @@ async function queryWallet(resolvedAddress, chainFilter, opts, sem) {
         };
       }
       try {
-        const result = await adapter.getBalances(resolvedAddress);
+        const result = await adapter.getBalances({
+          address: resolvedAddress,
+          rpcQuorum: opts.rpcQuorum ?? 'any',
+        });
         const ms = Date.now() - t0;
         multiSpinner?.update(chain, result.error ? 'fail' : 'ok', ms);
         return { chain, result, error: null };
@@ -425,6 +444,184 @@ async function queryWallet(resolvedAddress, chainFilter, opts, sem) {
     positions: positionsResult,
     nfts: nftsResult,
   };
+}
+
+/**
+ * Short, recognizable provider name extracted from an RPC URL. Falls back to
+ * the hostname (sans `www.` and TLD) when no friendly form is obvious.
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+function shortProviderName(url) {
+  try {
+    const { hostname } = new URL(url);
+    // Strip leading www. and trailing TLD; keep the middle "brand" segment.
+    const host = hostname.replace(/^www\./, '');
+    const parts = host.split('.');
+    if (parts.length <= 1) return host;
+    // For `eth.llamarpc.com` / `ethereum-rpc.publicnode.com` / `rpc.ankr.com`
+    // the brand is the second-to-last label.
+    const brand = parts[parts.length - 2];
+    return brand || host;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Format a single disagreement entry as a one-line stderr warning.
+ *
+ * @param {{chain:string,agreement:string,providers:Array<{url:string,value:any}>}} entry
+ * @param {'balance'|'transaction'} flow
+ * @returns {string}
+ */
+function formatDisagreementWarning(entry, flow) {
+  const short = v => {
+    if (v == null) return '—';
+    const s = String(v);
+    // 0x-prefixed hashes / long hex strings: 0xabcd…1234
+    if (/^0x[0-9a-fA-F]{16,}$/.test(s)) return `${s.slice(0, 6)}…${s.slice(-4)}`;
+    return s.length > 24 ? s.slice(0, 23) + '…' : s;
+  };
+  const pairs = entry.providers
+    .filter(p => p.value !== null && p.value !== undefined)
+    .map(p => `${shortProviderName(p.url)}=${short(p.value)}`)
+    .join(', ');
+  const kind = flow === 'transaction' ? 'transaction disagreement' : 'balance disagreement';
+  return `${c.yellow('!')} ${entry.chain}: ${kind} (${pairs}) — using ${entry.agreement}`;
+}
+
+/**
+ * Emit one stderr line per disagreement when stderr is an interactive TTY and
+ * structured output (`--json` / `--ndjson`) is not active. Silent otherwise so
+ * piped / redirected stderr stays clean (preserves the contract documented in
+ * README around the stdout/stderr split).
+ *
+ * @param {Array<object>|undefined} disagreements
+ * @param {'balance'|'transaction'} flow
+ * @param {{json?:boolean,ndjson?:boolean}} opts
+ */
+function maybeEmitDisagreementWarnings(disagreements, flow, opts) {
+  if (opts.json || opts.ndjson) return;
+  if (!process.stderr.isTTY) return;
+  if (!Array.isArray(disagreements) || disagreements.length === 0) return;
+  for (const entry of disagreements) {
+    process.stderr.write(formatDisagreementWarning(entry, flow) + '\n');
+  }
+}
+
+/**
+ * Format a single quorum-degradation entry as a one-line stderr warning.
+ *
+ * @param {{chain:string,requested:'majority'|'all',agreement:string,fulfilledCount:number,totalCount:number}} entry
+ * @returns {string}
+ */
+function formatDegradationWarning(entry) {
+  return `${c.yellow('!')} ${entry.chain}: quorum degraded (${entry.requested} requested, ${entry.fulfilledCount}/${entry.totalCount} RPCs responded) — see meta.sources.rpc.degraded`;
+}
+
+/**
+ * Emit one stderr line per degraded-quorum chain. Same suppression contract as
+ * maybeEmitDisagreementWarnings: silent under --json/--ndjson and on non-TTY
+ * stderr. Watch path opts out by not calling this helper.
+ *
+ * @param {Array<object>|undefined} degraded
+ * @param {'balance'|'transaction'} _flow
+ * @param {{json?:boolean,ndjson?:boolean}} opts
+ */
+function maybeEmitDegradationWarnings(degraded, _flow, opts) {
+  if (opts.json || opts.ndjson) return;
+  if (!process.stderr.isTTY) return;
+  if (!Array.isArray(degraded) || degraded.length === 0) return;
+  for (const entry of degraded) {
+    process.stderr.write(formatDegradationWarning(entry) + '\n');
+  }
+}
+
+/**
+ * Build a single degradation record from a one-shot quorum block (used by the
+ * tx flow which doesn't go through the wallet aggregator). Returns null when
+ * the user did not request majority/all, or when the quorum was fully served.
+ *
+ * @param {string} chain
+ * @param {{agreement?:string, sources?:Array<{status:string}>}|undefined} quorum
+ * @param {string|undefined} requested
+ * @returns {{chain:string,requested:'majority'|'all',agreement:string,fulfilledCount:number,totalCount:number}|null}
+ */
+function buildDegradationEntry(chain, quorum, requested) {
+  if (requested !== 'majority' && requested !== 'all') return null;
+  if (!quorum || !Array.isArray(quorum.sources)) return null;
+  const fulfilledCount = quorum.sources.filter(s => s.status === 'fulfilled').length;
+  const totalCount = quorum.sources.length;
+  if (totalCount <= 1) return null;
+  const threshold = requested === 'all' ? totalCount : Math.floor(totalCount / 2) + 1;
+  if (fulfilledCount >= threshold) return null;
+  return { chain, requested, agreement: quorum.agreement, fulfilledCount, totalCount };
+}
+
+/**
+ * Walk wallet results and produce one degradation entry per chain whose
+ * quorum call returned fewer fulfilled providers than the user requested
+ * (majority/all). Dedup is by chain — N wallets hitting the same chain
+ * surface once.
+ *
+ * @param {Array<{results: Array<{chain: string, result?: any, error?: any}>}>} wallets
+ * @param {'majority'|'all'} requested
+ * @returns {Array<{chain:string,requested:'majority'|'all',agreement:string,fulfilledCount:number,totalCount:number}>}
+ */
+function collectDegradationsFromWallets(wallets, requested) {
+  const out = [];
+  const seen = new Set();
+  for (const wallet of wallets) {
+    for (const r of wallet.results) {
+      if (r.error || r.result?.error) continue;
+      const quorum = r.result?.quorum;
+      if (!quorum || !Array.isArray(quorum.sources)) continue;
+      const fulfilledCount = quorum.sources.filter(s => s.status === 'fulfilled').length;
+      const totalCount = quorum.sources.length;
+      const threshold = requested === 'all' ? totalCount : Math.floor(totalCount / 2) + 1;
+      if (totalCount <= 1 || fulfilledCount >= threshold) continue;
+      if (seen.has(r.chain)) continue;
+      seen.add(r.chain);
+      out.push({
+        chain: r.chain,
+        requested,
+        agreement: quorum.agreement,
+        fulfilledCount,
+        totalCount,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Walk wallet results and produce one disagreement entry per unique
+ * (chain, sorted dissenter URLs) pair. Keeps two same-chain wallets that
+ * dissent on different providers from collapsing into a single entry.
+ *
+ * @param {Array<{results: Array<{chain: string, result?: any, error?: any}>}>} wallets
+ * @returns {Array<object>}
+ */
+function collectDisagreementsFromWallets(wallets) {
+  const out = [];
+  const seen = new Set();
+  for (const wallet of wallets) {
+    for (const r of wallet.results) {
+      if (r.error || r.result?.error) continue;
+      if (!r.result?.quorum || !isDisagreement(r.result.quorum)) continue;
+      const dissenters = (r.result.quorum.disagreements ?? []).map(d => d.url).sort().join('|');
+      const key = r.chain + ':' + dissenters;
+      if (seen.has(key)) continue;
+      const entry = buildDisagreementEntry(r.chain, r.result);
+      if (entry) {
+        out.push(entry);
+        seen.add(key);
+      }
+    }
+  }
+  return out;
 }
 
 /**
@@ -529,18 +726,38 @@ async function fetchBalances(addressInput, chainFilter, opts) {
   // ── Aggregate meta ────────────────────────────────────────────────────────
   const pricesMeta = mergePricesMeta(symbolMeta, ...contractMetas);
 
-  // Collect chains touched (across all wallets) + which failed
+  // Collect chains touched (across all wallets) + which failed + which provider
+  // URL ultimately answered for each successful chain. Failed chains are
+  // omitted from `providers` (no winning URL to attribute).
   const chainsTouched = new Set();
   const chainsFailed = new Set();
+  const providers = {};
+  const disagreements = [];
   for (const wallet of wallets) {
     for (const r of wallet.results) {
       chainsTouched.add(r.chain);
       if (r.error || r.result?.error) chainsFailed.add(r.chain);
+      else if (r.result?.source && providers[r.chain] === undefined) {
+        providers[r.chain] = redactUrl(r.result.source);
+      }
     }
   }
+  // Surface RPC quorum divergence so consumers can detect conflicting provider
+  // responses. Dedup is by (chain, sorted dissenter URLs) so two wallets on
+  // the same chain with different dissenters both surface.
+  disagreements.push(...collectDisagreementsFromWallets(wallets));
+  // Quorum degradation: only meaningful when user actually requested majority/all.
+  const requestedQuorum = opts?.rpcQuorum;
+  const degraded =
+    requestedQuorum === 'majority' || requestedQuorum === 'all'
+      ? collectDegradationsFromWallets(wallets, requestedQuorum)
+      : [];
   const rpcMeta = {
     ok: chainsFailed.size === 0,
     chainsFailed: [...chainsFailed],
+    providers,
+    disagreements,
+    degraded,
   };
 
   // Per-chain token-list meta for any EVM chain we touched
@@ -556,6 +773,8 @@ async function fetchBalances(addressInput, chainFilter, opts) {
 
   const partial =
     !rpcMeta.ok ||
+    rpcMeta.disagreements.length > 0 ||
+    rpcMeta.degraded.length > 0 ||
     (pricesMeta && pricesMeta.ok === false) ||
     (tokenListMeta && tokenListMeta.fallback === true);
 
@@ -665,6 +884,12 @@ export async function runBalance(addresses, chainFilter, opts = {}) {
   }
 
   const { wallets, prices, meta } = await fetchBalances(addrArray, chainFilter, opts);
+
+  // Surface RPC disagreements to interactive users (TTY stderr only, never in
+  // structured output). Iterates the aggregator's deduped list, not wallets,
+  // so multi-wallet runs hitting the same provider split warn once per chain.
+  maybeEmitDisagreementWarnings(meta?.sources?.rpc?.disagreements, 'balance', { json, ndjson });
+  maybeEmitDegradationWarnings(meta?.sources?.rpc?.degraded, 'balance', { json, ndjson });
 
   const multiWallet = addrArray.length > 1;
 
@@ -1103,12 +1328,22 @@ function buildJsonChains(address, chains, results, prices) {
       totalKnown = false;
     }
 
-    return {
+    // Freshness + provenance: surface the per-chain block height (EVM) or
+    // slot (Solana) and the winning provider URL onto the JSON output so
+    // consumers can attribute the data. `quorum` is preserved when present
+    // so callers running --rpc-quorum=majority can see the per-chain
+    // agreement metadata alongside the aggregated meta.disagreements.
+    const out = {
       chain,
       error: null,
       assets,
       totalUsd: chainTotalKnown ? chainTotalUsd : null,
     };
+    if (result?.source !== undefined) out.source = redactUrl(result.source);
+    if (result?.blockNumber !== undefined) out.blockNumber = result.blockNumber;
+    if (result?.slot !== undefined) out.slot = result.slot;
+    if (result?.quorum) out.quorum = redactQuorumUrls(jsonSafeQuorum(result.quorum));
+    return out;
   });
 
   return {
@@ -1120,6 +1355,27 @@ function buildJsonChains(address, chains, results, prices) {
 // ---------------------------------------------------------------------------
 // TX command
 // ---------------------------------------------------------------------------
+
+/**
+ * Redact `url` fields inside a (jsonSafe) adapter quorum block, in place-safe
+ * fashion. Used at the output boundary in the raw tx path to keep credentials
+ * out of the emitted envelope.
+ *
+ * @param {{ agreement?: string, disagreements?: any[], sources?: any[] }} quorum
+ * @returns {object}
+ */
+function redactQuorumUrls(quorum) {
+  if (!quorum || typeof quorum !== 'object') return quorum;
+  return {
+    ...quorum,
+    sources: Array.isArray(quorum.sources)
+      ? quorum.sources.map(s => (s && s.url ? { ...s, url: redactUrl(s.url) } : s))
+      : quorum.sources,
+    disagreements: Array.isArray(quorum.disagreements)
+      ? quorum.disagreements.map(d => (d && d.url ? { ...d, url: redactUrl(d.url) } : d))
+      : quorum.disagreements,
+  };
+}
 
 /**
  * Run the tx command: decode a transaction and render the summary.
@@ -1171,8 +1427,33 @@ export async function runTx(txHash, chain, opts = {}) {
     return;
   }
 
+  const rpcQuorum = opts.rpcQuorum ?? 'any';
+  const txRaw     = !!opts.raw;
+
   try {
-    const tx = await decoder.decodeTransaction(targetChain, txHash);
+    const tx = await decoder.decodeTransaction(targetChain, txHash, { rpcQuorum, raw: txRaw });
+
+    // ── Raw-mode short-circuit ────────────────────────────────────────────
+    // Skip ENS enrichment and the normalized renderer — the whole point of
+    // --raw is to emit the upstream RPC response verbatim under tx-raw/v1.
+    if (tx && tx.__schema === SCHEMA.TX_RAW) {
+      spinner?.stop();
+      const { __schema: _s, ...rest } = tx;
+      // Surface quorum divergence to TTY stderr even in raw mode. --raw forces
+      // json=true, but warnings go to stderr only — safe even when stdout is JSON.
+      if (rest.quorum && isDisagreement(rest.quorum)) {
+        const entry = buildDisagreementEntry(targetChain, { quorum: rest.quorum, source: rest.source });
+        if (entry) maybeEmitDisagreementWarnings([entry], 'transaction', { json: false, ndjson: false });
+      }
+      // Same for quorum degradation — stderr only, so safe even in raw/JSON mode.
+      const degradedEntry = buildDegradationEntry(targetChain, rest.quorum, rpcQuorum);
+      if (degradedEntry) maybeEmitDegradationWarnings([degradedEntry], 'transaction', { json: false, ndjson: false });
+      // Redact URLs at the output boundary (same invariant as the non-raw path).
+      if (rest.source !== undefined) rest.source = redactUrl(rest.source);
+      if (rest.quorum !== undefined) rest.quorum = redactQuorumUrls(rest.quorum);
+      emit(wrap(SCHEMA.TX_RAW, rest));
+      return;
+    }
 
     // Best-effort ENS reverse resolution for from/to so the renderer can
     // show "vitalik.eth" or a known contract label alongside the raw address.
@@ -1190,10 +1471,42 @@ export async function runTx(txHash, chain, opts = {}) {
       }
     }
 
+    // Build a balance-parity meta block when the adapter ran in a quorum mode.
+    // `providers.{chain}` is the redacted winning URL; `disagreements[]` is
+    // empty unless majority/all produced an actual divergence. partial=true
+    // only when there IS a disagreement — single-provider success matches the
+    // balance flow's behavior.
+    let meta = null;
+    if (tx && typeof tx === 'object' && tx.quorum) {
+      const rpcMeta = {
+        ok: true,
+        chainsFailed: [],
+        providers: tx.source ? { [targetChain]: redactUrl(tx.source) } : {},
+        disagreements: [],
+        degraded: [],
+      };
+      if (isDisagreement(tx.quorum)) {
+        const entry = buildDisagreementEntry(targetChain, { quorum: tx.quorum, source: tx.source });
+        if (entry) rpcMeta.disagreements.push(entry);
+      }
+      const degradedEntry = buildDegradationEntry(targetChain, tx.quorum, rpcQuorum);
+      if (degradedEntry) rpcMeta.degraded.push(degradedEntry);
+      meta = { sources: { rpc: rpcMeta } };
+      if (rpcMeta.disagreements.length > 0 || rpcMeta.degraded.length > 0) meta.partial = true;
+    }
+
+    // Surface RPC disagreements to interactive users (TTY stderr only, never
+    // in structured output) — same contract as the balance flow.
+    maybeEmitDisagreementWarnings(meta?.sources?.rpc?.disagreements, 'transaction', { json, ndjson });
+    maybeEmitDegradationWarnings(meta?.sources?.rpc?.degraded, 'transaction', { json, ndjson });
+
     spinner?.stop();
     if (json) {
-      const { raw: _raw, ...rest } = tx ?? {};
-      emit(wrap(SCHEMA.TX, { chain: targetChain, ...rest }));
+      const { raw: _raw, quorum: _q, ...rest } = tx ?? {};
+      // Redact the per-tx source URL at the output boundary so credentials in
+      // user-configured RPC URLs never leak into the envelope.
+      if (rest.source !== undefined) rest.source = redactUrl(rest.source);
+      emit(wrap(SCHEMA.TX, { chain: targetChain, ...rest }, meta));
     } else {
       renderTransaction(tx, { verbose });
     }
@@ -1492,3 +1805,11 @@ export async function runGasWatch(chainFilter, opts = {}) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// @internal — test-only named exports
+// These helpers are private implementation details. Exported solely to allow
+// the unit test suite to exercise them directly without instrumenting
+// production code in any other way. Do not rely on these in application code.
+// ---------------------------------------------------------------------------
+export { maybeEmitDisagreementWarnings, formatDisagreementWarning, shortProviderName, redactQuorumUrls, __setDecoderForTest, collectDisagreementsFromWallets, collectDegradationsFromWallets, buildDegradationEntry, formatDegradationWarning, maybeEmitDegradationWarnings };

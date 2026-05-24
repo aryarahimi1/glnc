@@ -6,7 +6,7 @@
  *
  * Exports:
  *   name          — 'bitcoin'
- *   getBalances(address)
+ *   getBalances({ address })
  *   getTransaction(txHash)
  */
 
@@ -40,7 +40,7 @@ async function apiFetch(path) {
  * Fetch Bitcoin balance for an address.
  * Blockstream returns { chain_stats, mempool_stats } — we use confirmed balance.
  *
- * @param {string} address  - Bitcoin address (bc1..., 1..., 3...)
+ * @param {{ address: string }} opts  - Bitcoin address (bc1..., 1..., 3...)
  * @returns {Promise<{
  *   chain: string,
  *   native: { symbol: string, amount: string, decimals: number },
@@ -48,7 +48,7 @@ async function apiFetch(path) {
  *   error: string | null
  * }>}
  */
-export async function getBalances(address) {
+export async function getBalances({ address } = {}) {
   try {
     const data = await apiFetch(`/address/${address}`);
 

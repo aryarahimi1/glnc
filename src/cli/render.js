@@ -1615,18 +1615,26 @@ ${c.bold('glnc balance')} <address>... [flags]
   the chain from the address format; pass --chain to scope to one chain.
 
 ${c.bold('FLAGS')}
-  --chain <name>      single chain (eth/poly/arb/base/op/zk/linea/sol/btc)
-  --watch / -w        re-poll on an interval; show deltas in place
-  --interval <N>      seconds between polls (default 15)
-  --positions / -p    include DeFi positions (Aave V3, Uniswap V3 LP)
-  --nfts / -n         include NFT holdings (Reservoir API, EVM only)
-  --verbose / -v      show full addresses
-  --json              emit JSON envelope on stdout (NDJSON when --watch)
-  --ndjson            force NDJSON even for one-shot
-  --strict            exit 3 on a partial result (any source degraded — see
-                      meta.partial). In --watch --json, also abort on first
-                      fetch error instead of emitting an error event.
-  --no-color          disable ANSI colors
+  --chain <name>           single chain (eth/poly/arb/base/op/zk/linea/sol/btc)
+  --watch / -w             re-poll on an interval; show deltas in place
+  --interval <N>           seconds between polls (default 15)
+  --positions / -p         include DeFi positions (Aave V3, Uniswap V3 LP)
+  --nfts / -n              include NFT holdings (Reservoir API, EVM only)
+  --verbose / -v           show full addresses
+  --json                   emit JSON envelope on stdout (NDJSON when --watch)
+  --ndjson                 force NDJSON even for one-shot
+  --strict                 exit 3 on a partial result (any source degraded — see
+                           meta.partial). In --watch --json, also abort on first
+                           fetch error instead of emitting an error event.
+  --rpc-quorum <any|majority|all>
+                           RPC consensus policy (default: any).
+                           any      — try providers sequentially, return first
+                                      success (default; lowest load)
+                           majority — query all providers in parallel; pick the
+                                      plurality winner, record disagreements
+                           all      — query all providers in parallel; throw if
+                                      any successful response disagrees
+  --no-color               disable ANSI colors
 
 ${c.bold('EXAMPLES')}
   glnc balance vitalik.eth
@@ -1645,13 +1653,19 @@ ${c.bold('glnc tx')} <hash> [flags]
 ${c.bold('FLAGS')}
   --chain <name>      override chain (eth/poly/arb/base/op/zk/linea/sol;
                       default: ethereum, or solana for base58)
+  --rpc-quorum <any|majority|all>
+                      RPC consensus policy (default: any)
   --json              emit JSON envelope on stdout
+  --raw               emit the upstream RPC getTransaction response verbatim
+                      under schema glnc.tx-raw/v1. Shape is provider-defined
+                      and NOT stable across providers or chains. Implies --json.
   --verbose / -v      show full addresses
   --no-color          disable ANSI colors
 
 ${c.bold('EXAMPLES')}
   glnc tx 0x02d15281c5514a447192cc8d6140216050f8d3bf92efccd420b635274764fb94
   glnc tx <sig> --chain solana --json
+  glnc tx <sig> --chain solana --raw | jq .data.raw.meta.fee
 `;
 
 const HELP_GAS = `

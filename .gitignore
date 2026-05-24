@@ -13,3 +13,7 @@ homebrew-glnc/
 
 # Private launch strategy — do not publish.
 LAUNCH*.md
+
+# Throwaway diagnostic scripts — never commit.
+diag_*.mjs
+diag_*.js

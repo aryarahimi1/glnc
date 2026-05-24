@@ -134,9 +134,9 @@ describe('SCHEMA', () => {
     }
   });
 
-  it('contains all 7 expected schema keys', () => {
+  it('contains all 8 expected schema keys', () => {
     const keys = Object.keys(SCHEMA);
-    assert.equal(keys.length, 7);
+    assert.equal(keys.length, 8);
   });
 
   it('ALL_SCHEMAS has same length as SCHEMA', () => {

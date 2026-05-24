@@ -68,3 +68,75 @@ describe('parseArgs — --cost-basis validation', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// --raw command-scope validation (v1.2.0)
+// ---------------------------------------------------------------------------
+
+describe('parseArgs — --raw is tx-only', () => {
+  it('throws ParseError when --raw is used on balance', () => {
+    assert.throws(
+      () => parseArgs(['balance', '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', '--raw']),
+      (err) => {
+        assert.ok(err instanceof ParseError);
+        assert.match(err.message, /--raw is only supported on/);
+        return true;
+      }
+    );
+  });
+
+  it('allows --raw on tx and implies --json', () => {
+    const args = parseArgs(['tx', '0xabc', '--raw']);
+    assert.equal(args.txRaw, true);
+    assert.equal(args.json, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// --rpc-quorum command-scope validation (v1.2.0)
+// ---------------------------------------------------------------------------
+
+describe('parseArgs — --rpc-quorum is balance/tx-only', () => {
+  it('throws on gas', () => {
+    assert.throws(
+      () => parseArgs(['gas', '--rpc-quorum', 'majority']),
+      (err) => {
+        assert.ok(err instanceof ParseError);
+        assert.match(err.message, /--rpc-quorum is only supported on/);
+        return true;
+      }
+    );
+  });
+
+  it('throws on history', () => {
+    assert.throws(
+      () => parseArgs(['history', '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', '--rpc-quorum=majority']),
+      (err) => {
+        assert.ok(err instanceof ParseError);
+        assert.match(err.message, /--rpc-quorum is only supported on/);
+        return true;
+      }
+    );
+  });
+
+  it('throws on alert', () => {
+    assert.throws(
+      () => parseArgs(['alert', '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', '--rpc-quorum=majority']),
+      (err) => {
+        assert.ok(err instanceof ParseError);
+        assert.match(err.message, /--rpc-quorum is only supported on/);
+        return true;
+      }
+    );
+  });
+
+  it('allows --rpc-quorum majority on balance', () => {
+    const args = parseArgs(['balance', '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', '--rpc-quorum', 'majority']);
+    assert.equal(args.rpcQuorum, 'majority');
+  });
+
+  it('allows --rpc-quorum=all on tx', () => {
+    const args = parseArgs(['tx', '0xabc', '--rpc-quorum=all']);
+    assert.equal(args.rpcQuorum, 'all');
+  });
+});
